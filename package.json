@@ -1,0 +1,14 @@
+{
+  "name": "satquery-ai",
+  "version": "1.0.0",
+  "description": "SatQuery AI - Interactive Vision-Language Assistant for Multimodal Remote Sensing Image Analysis",
+  "scripts": {
+    "install:frontend": "npm install --prefix frontend",
+    "start:backend": "PYTHONPATH=. python3 backend/api/main.py",
+    "start:frontend": "npm run dev --prefix frontend",
+    "start": "npx concurrently \"npm run start:backend\" \"npm run start:frontend\""
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}

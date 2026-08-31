@@ -1,0 +1,57 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: Inter, system-ui, Avenir, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+
+  color-scheme: dark;
+  background-color: #0d0f12;
+  color: #e2e8f0;
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  min-height: 100vh;
+}
+
+/* Custom Scrollbar for Geospatial Telemetry */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0f172a;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
+
+/* Dark Workstation styling for Leaflet */
+.leaflet-container {
+  background: #090b0d !important;
+  outline: none;
+  font-family: inherit;
+}
+
+/* Coordinate overlay hud */
+.hud-panel {
+  background: rgba(13, 17, 23, 0.85);
+  backdrop-filter: blur(4px);
+  border: 1px solid rgba(56, 139, 253, 0.2);
+}
