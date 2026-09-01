@@ -293,7 +293,7 @@ def test_rgb_water_detection_precision():
     user_img = os.path.join(BASE_DIR, "data", "session_43ca4eec-3e23-4ce7-993c-c5bf6f16a689", "image_1_d33c0f.tif")
     if os.path.exists(user_img):
         res = detect_water_optical(user_img)
-        assert res["method"].startswith("Visible Water Index")
+        assert "Visible Water Index" in res["method"]
         # Ensure green farmland is not falsely classified as >50% water (previously 89.9%)
         assert res["water_percentage"] < 0.20, f"Expected <20% water on farmland scene, got {res['water_percentage']:.1%}"
 

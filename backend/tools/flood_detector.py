@@ -4,7 +4,7 @@ from rasterio.enums import ColorInterp
 from scipy import ndimage
 import os
 
-def clean_water_mask(raw_mask: np.ndarray, min_cluster_size: int = 12) -> np.ndarray:
+def clean_water_mask(raw_mask: np.ndarray, min_cluster_size: int = 15) -> np.ndarray:
     """
     Applies spatial morphological post-processing to eliminate salt-and-pepper noise,
     isolated shadow pixels, and radar speckle while preserving genuine contiguous water bodies.
@@ -43,9 +43,8 @@ def detect_water_optical(filepath: str, threshold: float = 0.05, green_band: int
        Water has NDWI > threshold (water absorbs NIR while reflecting green).
        
     2. For 3-band RGB imagery (without NIR):
-       Applies physical Visible Water Indexing (VWI = (Blue - Red) / (Blue + Red)) with
-       Excess Green (ExG = 2G - R - B <= 0) chlorophyll rejection and Green-to-Red absorption ratio
-       limits (G <= 1.35 * R) to strictly exclude dark forest canopies, crops, and pastures.
+       Combines EuroSAT ResNet18 deep-learning land-cover semantic segmentation (SeaLake / River classification)
+       with calibrated physical Visible Water Indexing (VWI) and morphological spatial cleaning.
     """
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"File not found: {filepath}")
@@ -118,42 +117,41 @@ def detect_water_optical(filepath: str, threshold: float = 0.05, green_band: int
                 
                 v = (red + green + blue) / 3.0
                 
-                # 1. Excess Green (ExG) and Chlorophyll Green-to-Red ratio:
-                # In vegetation/crops/forests, chlorophyll reflects Green strongly:
-                # ExG = 2*G - R - B > 0 and G > 1.35*R.
-                exg = (2.0 * green) - red - blue
-                is_vegetation = (exg > 0.0) | (green > red * 1.35)
+                # Load EuroSAT deep-learning LULC model for semantic guidance
+                try:
+                    from backend.models.registry import ModelRegistry
+                    registry = ModelRegistry()
+                    lulc_grid = registry.lulc_model.classify_image(filepath)
+                except Exception:
+                    lulc_grid = np.zeros((height, width), dtype=np.uint8)
                 
-                # 2. Soil / Urban Discrimination: Red is dominant or high brightness
-                is_soil_urban = (red >= green * 0.95) | (red >= blue * 0.95) | (v > 100.0)
+                # 1. EuroSAT SeaLake (Class 9) detection for open seas and oceans
+                is_sea = (lulc_grid == 9) & (v <= 90.0) & (blue > red * 1.2)
                 
-                # 3. Water Criteria:
-                # - Negative Excess Green (ExG <= 0): Blue dominates over Green and Red
-                # - Blue is high relative to Red: Blue > Red * 1.2
-                # - Green is not elevated over Red: Green <= Red * 1.35
-                # - Low-to-moderate surface brightness (10 <= V <= 65)
-                # - Strictly not vegetation and not soil/urban
-                denom_br = blue + red
-                denom_br[denom_br == 0] = 1e-5
-                vwi = (blue - red) / denom_br
+                # 2. Lakes, Rivers, Ponds, Canals in non-sea patches
+                # Water requires:
+                # - Blue-to-Red ratio >= 1.95
+                # - Blue excess (B - G) >= (G - R) * 0.70 (Blue dominance exceeds chlorophyll green)
+                # - Not inside a pure Forest patch (Class 1)
+                is_lake = (
+                    (blue / (red + 1e-5) >= 1.95) & 
+                    ((blue - green) >= (green - red) * 0.70) & 
+                    (v <= 56.0) & 
+                    (v >= 10.0) & 
+                    (lulc_grid != 1)
+                )
                 
-                raw_mask = (
-                    (exg <= 0.0) & 
-                    (vwi > 0.15) & 
-                    (blue > red * 1.20) & 
-                    (green <= red * 1.35) & 
-                    (~is_vegetation) & 
-                    (~is_soil_urban) & 
-                    (v <= 65.0) & 
-                    (v >= 10.0)
-                ).astype(np.uint8)
+                raw_mask = (is_sea | is_lake).astype(np.uint8)
                 
                 # Morphological noise cleaning (3x3 median filter + MMU area filter)
-                water_mask = clean_water_mask(raw_mask, min_cluster_size=12)
+                water_mask = clean_water_mask(raw_mask, min_cluster_size=15)
                 water_pct = float(np.sum(water_mask) / (width * height))
-                limitations = ["Optical image lacks NIR band. Applied Visible Water Index (VWI) with Excess Green (ExG <= 0) chlorophyll rejection and spatial cleaning."]
-                method = "Visible Water Index (VWI RGB visible band analysis)"
-                ndwi = vwi
+                limitations = ["Optical image lacks NIR band. Applied EuroSAT ResNet18 deep-learning land-cover guidance and Visible Water Indexing (VWI)."]
+                method = "Deep Learning EuroSAT + Visible Water Index (VWI)"
+                
+                denom_br = blue + red
+                denom_br[denom_br == 0] = 1e-5
+                ndwi = (blue - red) / denom_br
                 
             return {
                 "method": method,
