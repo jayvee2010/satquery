@@ -1,7 +1,38 @@
 import numpy as np
 import rasterio
 from rasterio.enums import ColorInterp
+from scipy import ndimage
 import os
+
+def clean_water_mask(raw_mask: np.ndarray, min_cluster_size: int = 8) -> np.ndarray:
+    """
+    Applies spatial morphological post-processing to eliminate salt-and-pepper noise,
+    isolated shadow pixels, and radar speckle while preserving genuine contiguous water bodies.
+    1. 3x3 Median filtering to remove isolated 1-2 pixel spikes.
+    2. Connected component labeling to discard tiny isolated noise clusters (< min_cluster_size).
+    3. Binary hole filling for continuous water bodies.
+    """
+    if np.sum(raw_mask) == 0:
+        return raw_mask
+        
+    # 1. 3x3 Median filter for noise suppression
+    filtered = ndimage.median_filter(raw_mask, size=3)
+    
+    # 2. Connected component labeling (Minimum Mapping Unit)
+    labeled_array, num_features = ndimage.label(filtered)
+    if num_features > 0:
+        sizes = ndimage.sum(filtered, labeled_array, range(1, num_features + 1))
+        # Keep clusters >= min_cluster_size
+        keep_labels = np.where(sizes >= min_cluster_size)[0] + 1
+        cleaned = np.isin(labeled_array, keep_labels).astype(np.uint8)
+    else:
+        cleaned = filtered
+        
+    # 3. Fill small internal holes in large water bodies
+    if np.sum(cleaned) > 50:
+        cleaned = ndimage.binary_fill_holes(cleaned).astype(np.uint8)
+        
+    return cleaned
 
 def detect_water_optical(filepath: str, threshold: float = 0.05, green_band: int = 2, nir_band: int = 4) -> dict:
     """
@@ -59,8 +90,9 @@ def detect_water_optical(filepath: str, threshold: float = 0.05, green_band: int
                 denominator[denominator == 0] = 1e-5
                 ndwi = (green - nir) / denominator
                 
-                # Thresholding to get binary mask (1 = water, 0 = non-water)
-                water_mask = (ndwi > threshold).astype(np.uint8)
+                # Thresholding and shadow guardrail
+                raw_mask = (ndwi > threshold).astype(np.uint8)
+                water_mask = clean_water_mask(raw_mask, min_cluster_size=8)
                 water_pct = float(np.sum(water_mask) / (width * height))
                 
                 limitations = []
@@ -107,13 +139,8 @@ def detect_water_optical(filepath: str, threshold: float = 0.05, green_band: int
                 denom_br[denom_br == 0] = 1e-5
                 vwi = (b - r) / denom_br
                 
-                # Water Body Identification:
-                # - High Blue-to-Red contrast (VWI > 0.15 and Blue > Red * 1.15)
-                # - Blue is dominant or co-dominant with Green (Blue >= Green * 0.95)
-                # - Strictly NOT vegetation (excludes crops, grass, forests)
-                # - Strictly NOT soil/urban/roads
-                # - Surface brightness is within valid water range (1.0 <= v_surf <= 120.0)
-                water_mask = (
+                # Raw Water Identification
+                raw_mask = (
                     (vwi > 0.15) & 
                     (b >= g * 0.95) & 
                     (b > r * 1.15) & 
@@ -123,8 +150,10 @@ def detect_water_optical(filepath: str, threshold: float = 0.05, green_band: int
                     (v_surf <= 120.0)
                 ).astype(np.uint8)
                 
+                # Morphological noise cleaning
+                water_mask = clean_water_mask(raw_mask, min_cluster_size=10)
                 water_pct = float(np.sum(water_mask) / (width * height))
-                limitations = ["Optical image lacks NIR band. Applied Visible Water Index (VWI) with DOS1 atmospheric haze correction to distinguish water from agricultural vegetation."]
+                limitations = ["Optical image lacks NIR band. Applied Visible Water Index (VWI) with DOS1 atmospheric haze correction and morphological spatial filtering."]
                 method = "Visible Water Index (with DOS1 Atmospheric Haze Correction)"
                 ndwi = vwi
                 
@@ -145,9 +174,7 @@ def detect_water_sar(filepath: str, threshold_db: float = -18.0, sar_band: int =
     Detects water in SAR (Synthetic Aperture Radar) imagery.
     Water has low backscatter (smooth surface, specular reflection).
     Uses a threshold on polarization backscatter (typically VH or VV in dB).
-    
-    If the image values are amplitudes (positive integers/floats > 0), they are converted to dB:
-    dB = 20 * log10(amplitude) - calibration_constant
+    Applies morphological filtering to eliminate radar speckle noise.
     """
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"File not found: {filepath}")
@@ -157,26 +184,19 @@ def detect_water_sar(filepath: str, threshold_db: float = -18.0, sar_band: int =
             width, height = src.width, src.height
             band_data = src.read(min(sar_band, src.count)).astype(np.float32)
             
-            # Check if values are in dB or raw amplitudes
-            # Decibel values are typically negative (e.g. -30 to -5)
-            # Amplitudes are positive values (e.g. 0 to 1000+)
             is_db = np.any(band_data < 0)
-            
             db_data = band_data
             limitations = []
             if not is_db:
-                # Convert raw amplitude to scale resembling dB
-                # Standard formula: 20 * log10(val)
-                # Avoid log(0)
                 safe_val = np.clip(band_data, 1e-5, None)
-                # Normalize values first if they look like 16-bit integers
                 if np.max(band_data) > 1.0:
                     safe_val = safe_val / np.max(band_data)
                 db_data = 20 * np.log10(safe_val)
                 limitations.append("SAR backscatter was converted from raw amplitude to relative decibels (dB) using log scale normalization.")
             
-            # Thresholding (pixels with backscatter less than threshold are water)
-            water_mask = (db_data < threshold_db).astype(np.uint8)
+            # Thresholding + Morphological speckle filtering
+            raw_mask = (db_data < threshold_db).astype(np.uint8)
+            water_mask = clean_water_mask(raw_mask, min_cluster_size=8)
             water_pct = float(np.sum(water_mask) / (width * height))
             
             return {
