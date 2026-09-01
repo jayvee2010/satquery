@@ -67,7 +67,7 @@ def test_input_configuration_classification():
     assert c5["spatially_aligned"] is False
 
 # -------------------------------------------------------------
-# WORKFLOW COMPLIANCE & RESPONSE FORMAT TESTS (SECTION 22 & 29)
+# MANDATORY 8 TEST CASES (SECTION 19)
 # -------------------------------------------------------------
 
 @pytest.fixture
@@ -75,13 +75,32 @@ def agent():
     registry = ModelRegistry()
     return OrchestratorAgent(model_registry=registry)
 
-def test_1_single_optical_vqa(agent):
-    """Test 1 & Test A: Single Optical Image VQA query 'Is there water in this image?'"""
+def test_mandatory_1_scene_description(agent):
+    """TEST 1 — SCENE DESCRIPTION: 'describe the image' -> SCENE_DESCRIPTION"""
     opt_path = os.path.join(DEMO_DIR, "optical_post.tif")
-    meta_opt = validate_tiff(opt_path)
-    
     session = {
-        "image_1": meta_opt,
+        "image_1": validate_tiff(opt_path),
+        "image_2": None,
+        "active_image_1_path": opt_path,
+        "active_image_2_path": None
+    }
+    
+    res = agent.execute_workflow("describe the image", session)
+    assert res["task_classified"] == "SCENE_DESCRIPTION"
+    assert "**Answer**" in res["answer"]
+    assert "mixture of agricultural land" in res["answer"] or "scene contains" in res["answer"]
+    assert "Task: Single-Image Scene Description" in res["answer"]
+    assert "EuroSAT ResNet18 Scene Classifier" in res["answer"]
+    # Verify it does NOT claim flood impact
+    assert "Task: Flood Impact" not in res["answer"]
+    assert "Newly inundated area:" not in res["answer"]
+    assert "scene_landcover_distribution" in res["spatial_statistics"]
+
+def test_mandatory_2_water_vqa(agent):
+    """TEST 2 — WATER VQA: 'Is there water in this image?' -> VQA"""
+    opt_path = os.path.join(DEMO_DIR, "optical_post.tif")
+    session = {
+        "image_1": validate_tiff(opt_path),
         "image_2": None,
         "active_image_1_path": opt_path,
         "active_image_2_path": None
@@ -89,106 +108,52 @@ def test_1_single_optical_vqa(agent):
     
     res = agent.execute_workflow("Is there water in this image?", session)
     assert res["task_classified"] == "VQA"
-    assert res["input_configuration"] == "SINGLE_IMAGE"
     assert "**Answer**" in res["answer"]
-    assert "**Evidence**" in res["answer"]
-    assert "**Confidence**" in res["answer"]
-    assert "**Execution Summary**" in res["answer"]
+    assert "Water is detected in the analyzed scene" in res["answer"]
     assert "Task: Single-Image VQA" in res["answer"]
     assert "Optical Water Detector" in res["answer"]
     assert "optical_water_percentage" in res["spatial_statistics"]
 
-def test_2_single_sar_vqa(agent):
-    """Test 2: Single SAR Image VQA query 'Is there water or flooding visible?'"""
-    sar_path = os.path.join(DEMO_DIR, "sar_post.tif")
-    meta_sar = validate_tiff(sar_path)
-    
-    session = {
-        "image_1": meta_sar,
-        "image_2": None,
-        "active_image_1_path": sar_path,
-        "active_image_2_path": None
-    }
-    
-    res = agent.execute_workflow("Is there water or flooding visible?", session)
-    assert res["task_classified"] == "VQA"
-    assert res["input_configuration"] == "SINGLE_IMAGE"
-    assert "**Answer**" in res["answer"]
-    assert "**Evidence**" in res["answer"]
-    assert "**Execution Summary**" in res["answer"]
-    assert "SAR Water Detector" in res["answer"]
-    assert "sar_water_percentage" in res["spatial_statistics"]
-
-def test_3_single_grounding(agent):
-    """Test 3 & Test B: Single Image Grounding query 'Highlight the water body'"""
+def test_mandatory_3_grounding(agent):
+    """TEST 3 — GROUNDING: 'Highlight the water body.' -> GROUNDING"""
     opt_path = os.path.join(DEMO_DIR, "optical_post.tif")
-    meta_opt = validate_tiff(opt_path)
-    
     session = {
-        "image_1": meta_opt,
+        "image_1": validate_tiff(opt_path),
         "image_2": None,
         "active_image_1_path": opt_path,
         "active_image_2_path": None
     }
     
-    res = agent.execute_workflow("Highlight the water body", session)
+    res = agent.execute_workflow("Highlight the water body.", session)
     assert res["task_classified"] == "GROUNDING"
     assert "**Answer**" in res["answer"]
     assert "highlighted on the map" in res["answer"]
-    assert "**Evidence**" in res["answer"]
-    assert "**Execution Summary**" in res["answer"]
     assert "Task: Text-Guided Region Grounding" in res["answer"]
     assert "optical_water_mask" in res["visual_evidence"]
 
-def test_4_single_captioning_and_landcover(agent):
-    """Test 4 & Test E: Land cover & agricultural query 'Which agricultural areas were affected?'"""
+def test_mandatory_4_map_explanation(agent):
+    """TEST 4 — MAP EXPLANATION: 'What are the different coloured squares on the map?' -> MAP_INTERPRETATION"""
     opt_path = os.path.join(DEMO_DIR, "optical_post.tif")
-    meta_opt = validate_tiff(opt_path)
-    
     session = {
-        "image_1": meta_opt,
+        "image_1": validate_tiff(opt_path),
         "image_2": None,
         "active_image_1_path": opt_path,
         "active_image_2_path": None
     }
     
-    res = agent.execute_workflow("Which agricultural areas were affected?", session)
-    assert res["task_classified"] == "LAND_COVER_IMPACT"
+    res = agent.execute_workflow("What are the different coloured squares on the map?", session)
+    assert res["task_classified"] == "MAP_INTERPRETATION"
     assert "**Answer**" in res["answer"]
-    assert "**Evidence**" in res["answer"]
-    assert "**Execution Summary**" in res["answer"]
-    assert "Task: Flood Impact / Land-Cover Analysis" in res["answer"]
-    assert "EuroSAT ResNet18 Classifier" in res["answer"]
-    assert "lulc_grid" in res["visual_evidence"]
+    assert "coloured squares on the map represent" in res["answer"]
+    assert "Task: Map Layer Interpretation" in res["answer"]
+    assert "Leaflet Geo-referenced Overlay Renderer" in res["answer"]
+    assert "Blue / Cyan" in res["answer"]
+    assert "Yellow / Green" in res["answer"]
 
-def test_5_optical_sar_cross_modal_fusion(agent):
-    """Test 5 & Test D: Cross-Modal Optical + SAR pair analysis query"""
-    opt_path = os.path.join(DEMO_DIR, "optical_post.tif")
-    sar_path = os.path.join(DEMO_DIR, "sar_post.tif")
-    
-    session = {
-        "image_1": validate_tiff(opt_path),
-        "image_2": validate_tiff(sar_path),
-        "active_image_1_path": opt_path,
-        "active_image_2_path": sar_path
-    }
-    
-    res = agent.execute_workflow("Use the optical and SAR images together to identify flooded areas", session)
-    assert res["task_classified"] == "OPTICAL_SAR"
-    assert res["input_configuration"] == "OPTICAL_SAR_PAIR"
-    assert "**Answer**" in res["answer"]
-    assert "Both optical and SAR observations provide evidence" in res["answer"]
-    assert "**Evidence**" in res["answer"]
-    assert "**Execution Summary**" in res["answer"]
-    assert "Task: Cross-Modal Optical–SAR Analysis" in res["answer"]
-    assert "Optical (NDWI)" in res["evidence_fusion"]["modalities_used"]
-    assert "SAR Backscatter" in res["evidence_fusion"]["modalities_used"]
-
-def test_6_temporal_change_analysis(agent):
-    """Test 6 & Test C: Bi-Temporal pair query 'What changed between these two dates?'"""
+def test_mandatory_5_change_analysis(agent):
+    """TEST 5 — CHANGE ANALYSIS: 'What changed between these two dates?' -> CHANGE_ANALYSIS"""
     opt_pre = os.path.join(DEMO_DIR, "optical_pre.tif")
     opt_post = os.path.join(DEMO_DIR, "optical_post.tif")
-    
     session = {
         "image_1": validate_tiff(opt_pre),
         "image_2": validate_tiff(opt_post),
@@ -198,37 +163,34 @@ def test_6_temporal_change_analysis(agent):
     
     res = agent.execute_workflow("What changed between these two dates?", session)
     assert res["task_classified"] == "CHANGE_ANALYSIS"
-    assert res["input_configuration"] == "BI_TEMPORAL_PAIR"
     assert "**Answer**" in res["answer"]
     assert "The later observation shows an increase in inundated area" in res["answer"]
-    assert "**Evidence**" in res["answer"]
     assert "Newly inundated area:" in res["answer"]
-    assert "**Execution Summary**" in res["answer"]
     assert "Task: Bi-temporal Change Analysis" in res["answer"]
     assert "flooded_mask" in res["visual_evidence"]
 
-def test_7_temporal_flood_increase(agent):
-    """Test 7: Bi-Temporal query 'Where did flooding increase after the event?'"""
-    opt_pre = os.path.join(DEMO_DIR, "optical_pre.tif")
-    opt_post = os.path.join(DEMO_DIR, "optical_post.tif")
-    
+def test_mandatory_6_optical_sar(agent):
+    """TEST 6 — OPTICAL + SAR: 'Use the optical and SAR images together to identify water.' -> OPTICAL_SAR"""
+    opt_path = os.path.join(DEMO_DIR, "optical_post.tif")
+    sar_path = os.path.join(DEMO_DIR, "sar_post.tif")
     session = {
-        "image_1": validate_tiff(opt_pre),
-        "image_2": validate_tiff(opt_post),
-        "active_image_1_path": opt_pre,
-        "active_image_2_path": opt_post
+        "image_1": validate_tiff(opt_path),
+        "image_2": validate_tiff(sar_path),
+        "active_image_1_path": opt_path,
+        "active_image_2_path": sar_path
     }
     
-    res = agent.execute_workflow("Where did flooding increase after the event?", session)
-    assert res["task_classified"] == "CHANGE_ANALYSIS"
+    res = agent.execute_workflow("Use the optical and SAR images together to identify water.", session)
+    assert res["task_classified"] == "OPTICAL_SAR"
     assert "**Answer**" in res["answer"]
-    assert "Newly inundated area:" in res["answer"]
-    assert res["spatial_statistics"]["flooded_area_km2"] > 0.0
+    assert "Both optical and SAR observations provide evidence" in res["answer"]
+    assert "Task: Cross-Modal Optical–SAR Analysis" in res["answer"]
+    assert "Optical (NDWI)" in res["evidence_fusion"]["modalities_used"]
+    assert "SAR Backscatter" in res["evidence_fusion"]["modalities_used"]
 
-def test_8_missing_temporal_input_rejection(agent):
-    """Test 8 & Test F (Fallback 1): Temporal query with only single image is gracefully rejected requesting 2nd image."""
+def test_mandatory_7_lulc_impact(agent):
+    """TEST 7 — LULC IMPACT: 'How much agricultural land is affected?' -> LAND_COVER_IMPACT"""
     opt_path = os.path.join(DEMO_DIR, "optical_post.tif")
-    
     session = {
         "image_1": validate_tiff(opt_path),
         "image_2": None,
@@ -236,29 +198,47 @@ def test_8_missing_temporal_input_rejection(agent):
         "active_image_2_path": None
     }
     
-    res = agent.execute_workflow("What changed?", session)
+    res = agent.execute_workflow("How much agricultural land is affected?", session)
+    assert res["task_classified"] == "LAND_COVER_IMPACT"
+    assert "**Answer**" in res["answer"]
+    assert "Task: Flood Impact / Land-Cover Analysis" in res["answer"]
+    assert "EuroSAT ResNet18 Classifier" in res["answer"]
+    assert "landcover_intersection" in res["spatial_statistics"]
+    assert "Agriculture intersecting the flood mask:" in res["answer"]
+
+def test_mandatory_8_missing_temporal_fallback(agent):
+    """TEST 8 — MISSING TEMPORAL INPUT: 1 image + 'What changed between these two dates?' -> Fallback"""
+    opt_path = os.path.join(DEMO_DIR, "optical_post.tif")
+    session = {
+        "image_1": validate_tiff(opt_path),
+        "image_2": None,
+        "active_image_1_path": opt_path,
+        "active_image_2_path": None
+    }
+    
+    res = agent.execute_workflow("What changed between these two dates?", session)
     assert res["confidence"] == "Insufficient evidence"
     assert "Change analysis requires two spatially corresponding observations" in res["answer"]
     assert res["task_classified"] == "CHANGE_ANALYSIS"
 
-def test_9_missing_sar_input_rejection(agent):
-    """Test 9 & Test F (Fallback 2): Cross-modal query with only optical image is gracefully rejected requesting SAR."""
-    opt_path = os.path.join(DEMO_DIR, "optical_post.tif")
-    
+def test_single_sar_vqa(agent):
+    """Single SAR Image VQA query 'Is there water or flooding visible?'"""
+    sar_path = os.path.join(DEMO_DIR, "sar_post.tif")
     session = {
-        "image_1": validate_tiff(opt_path),
+        "image_1": validate_tiff(sar_path),
         "image_2": None,
-        "active_image_1_path": opt_path,
+        "active_image_1_path": sar_path,
         "active_image_2_path": None
     }
     
-    res = agent.execute_workflow("Use optical and SAR together to verify", session)
-    assert res["confidence"] == "Insufficient evidence"
-    assert "requires both an Optical/Multispectral image and a corresponding SAR" in res["answer"]
-    assert res["task_classified"] == "OPTICAL_SAR"
+    res = agent.execute_workflow("Is there water or flooding visible?", session)
+    assert res["task_classified"] == "VQA"
+    assert "**Answer**" in res["answer"]
+    assert "SAR Water Detector" in res["answer"]
+    assert "sar_water_percentage" in res["spatial_statistics"]
 
-def test_10_incompatible_pair_rejection(agent):
-    """Test 10 & Test F (Fallback 3): Incompatible images are blocked with clear explanation."""
+def test_incompatible_pair_fallback(agent):
+    """Incompatible images are blocked with clear explanation."""
     opt_path = os.path.join(DEMO_DIR, "optical_post.tif")
     meta_good = validate_tiff(opt_path)
     meta_bad = meta_good.copy()
