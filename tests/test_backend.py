@@ -287,3 +287,13 @@ def test_incompatible_pair_fallback(agent):
     res = agent.execute_workflow("What changed?", session)
     assert res["confidence"] == "Insufficient evidence"
     assert "spatial incompatibility" in res["answer"]
+
+def test_rgb_water_detection_precision():
+    """Verify 3-band RGB optical water detector correctly rejects green agricultural fields."""
+    user_img = os.path.join(BASE_DIR, "data", "session_43ca4eec-3e23-4ce7-993c-c5bf6f16a689", "image_1_d33c0f.tif")
+    if os.path.exists(user_img):
+        res = detect_water_optical(user_img)
+        assert res["method"].startswith("Visible Water Index")
+        # Ensure green farmland is not falsely classified as >50% water
+        assert res["water_percentage"] < 0.10, f"Expected <10% water on farmland, got {res['water_percentage']:.1%}"
+

@@ -1,13 +1,20 @@
 import numpy as np
 import rasterio
+from rasterio.enums import ColorInterp
 import os
 
 def detect_water_optical(filepath: str, threshold: float = 0.05, green_band: int = 2, nir_band: int = 4) -> dict:
     """
-    Detects water in optical imagery using the Normalized Difference Water Index (NDWI).
-    NDWI = (Green - NIR) / (Green + NIR)
-    
-    If the image does not have 4 bands, it falls back to a color-based green-red difference index.
+    Detects water in optical imagery:
+    1. For Multispectral imagery (4+ bands with NIR):
+       Calculates the standard McFeeters Normalized Difference Water Index (NDWI):
+       NDWI = (Green - NIR) / (Green + NIR)
+       Water has NDWI > threshold (water absorbs NIR while reflecting green).
+       
+    2. For 3-band RGB imagery (without NIR):
+       Applies Dark Object Subtraction (DOS1) to remove atmospheric Rayleigh scattering (blue haze pedestal),
+       followed by the Normalized Visible Water Index (VWI / NDWI_RGB) with Excess Green (ExG) vegetation suppression
+       and soil/urban rejection.
     """
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"File not found: {filepath}")
@@ -32,7 +39,7 @@ def detect_water_optical(filepath: str, threshold: float = 0.05, green_band: int
                     found_by_name = True
                     
             if not found_by_name:
-                if src.count in [12, 13]: # Sentinel-2 standard
+                if src.count in [12, 13]: # Sentinel-2 standard 12/13 bands
                     g_idx = 3
                     nir_idx = 8
                 elif src.count >= 4:
@@ -57,31 +64,69 @@ def detect_water_optical(filepath: str, threshold: float = 0.05, green_band: int
                 water_pct = float(np.sum(water_mask) / (width * height))
                 
                 limitations = []
-                method = "NDWI (Normalized Difference Water Index)"
+                method = "NDWI (Normalized Difference Water Index with NIR)"
             else:
-                # Fallback for RGB (3 bands)
-                # NDWI is not possible without NIR. We use a modified Green-Red ratio.
-                # Normalized Green-Red Difference Index (NGRDI) = (Green - Red) / (Green + Red)
-                red = src.read(1).astype(np.float32)
-                green = src.read(2).astype(np.float32)
+                # 3-Band RGB optical imagery (without NIR)
+                r_idx, g_idx, b_idx = 1, 2, 3
+                if src.colorinterp:
+                    for idx, ci in enumerate(src.colorinterp, start=1):
+                        if ci == ColorInterp.red: r_idx = idx
+                        elif ci == ColorInterp.green: g_idx = idx
+                        elif ci == ColorInterp.blue: b_idx = idx
+                elif src.descriptions:
+                    for idx, desc in enumerate(src.descriptions, start=1):
+                        d = desc.lower() if desc else ""
+                        if "red" in d or "b04" in d or "b4" in d: r_idx = idx
+                        elif "green" in d or "b03" in d or "b3" in d: g_idx = idx
+                        elif "blue" in d or "b02" in d or "b2" in d: b_idx = idx
+                        
+                r_raw = src.read(r_idx).astype(np.float32)
+                g_raw = src.read(g_idx).astype(np.float32)
+                b_raw = src.read(b_idx).astype(np.float32)
                 
-                denominator = green + red
-                denominator[denominator == 0] = 1e-5
-                ngrdi = (green - red) / denominator
+                # Apply Dark Object Subtraction (DOS1) to remove atmospheric path radiance / Rayleigh blue haze
+                p1_r = np.percentile(r_raw, 1)
+                p1_g = np.percentile(g_raw, 1)
+                p1_b = np.percentile(b_raw, 1)
                 
-                # Water in RGB usually has slightly higher green and lower red than land,
-                # but it's less reliable.
-                # Let's also check absolute brightness (water is dark)
-                blue = src.read(3).astype(np.float32)
-                mean_brightness = (red + green + blue) / 3.0
+                r = np.maximum(0.0, r_raw - p1_r)
+                g = np.maximum(0.0, g_raw - p1_g)
+                b = np.maximum(0.0, b_raw - p1_b)
                 
-                # Custom RGB water mask: green > red and mean_brightness is low
-                water_mask = ((ngrdi > 0.05) & (mean_brightness < 100)).astype(np.uint8)
+                v_surf = (r + g + b) / 3.0
+                
+                # Excess Green (Vegetation discrimination on surface reflectance)
+                exg = (2.0 * g) - r - b
+                is_vegetation = (g > b * 1.05) & (exg > 1.0) & (g > r * 1.05)
+                
+                # Soil / Built-up discrimination (Red dominance)
+                is_soil_urban = (r >= g * 1.05) | (r >= b * 1.05)
+                
+                # Visible Water Index (Blue - Red surface contrast)
+                denom_br = b + r
+                denom_br[denom_br == 0] = 1e-5
+                vwi = (b - r) / denom_br
+                
+                # Water Body Identification:
+                # - High Blue-to-Red contrast (VWI > 0.15 and Blue > Red * 1.15)
+                # - Blue is dominant or co-dominant with Green (Blue >= Green * 0.95)
+                # - Strictly NOT vegetation (excludes crops, grass, forests)
+                # - Strictly NOT soil/urban/roads
+                # - Surface brightness is within valid water range (1.0 <= v_surf <= 120.0)
+                water_mask = (
+                    (vwi > 0.15) & 
+                    (b >= g * 0.95) & 
+                    (b > r * 1.15) & 
+                    (~is_vegetation) & 
+                    (~is_soil_urban) & 
+                    (v_surf >= 1.0) & 
+                    (v_surf <= 120.0)
+                ).astype(np.uint8)
+                
                 water_pct = float(np.sum(water_mask) / (width * height))
-                
-                limitations = ["Optical image lacks NIR band. Falling back to NGRDI (color difference index) which has lower reliability and is prone to vegetation/shadow confusion."]
-                method = "NGRDI (Green-Red Difference Index with brightness threshold)"
-                ndwi = ngrdi # for visualization compatibility
+                limitations = ["Optical image lacks NIR band. Applied Visible Water Index (VWI) with DOS1 atmospheric haze correction to distinguish water from agricultural vegetation."]
+                method = "Visible Water Index (with DOS1 Atmospheric Haze Correction)"
+                ndwi = vwi
                 
             return {
                 "method": method,

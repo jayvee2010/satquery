@@ -533,7 +533,7 @@ class OrchestratorAgent:
         status = "INSUFFICIENT"
         
         if opt_water:
-            opt_method_short = "NGRDI" if "NGRDI" in opt_water.get("method", "") else "NDWI"
+            opt_method_short = "VWI" if "Visible" in opt_water.get("method", "") or "VWI" in opt_water.get("method", "") else "NDWI"
             modalities_used.append(f"Optical ({opt_method_short})")
             opt_findings = f"{opt_method_short} water detection: {opt_water['water_percentage']:.1%} scene area."
             status = "CONFIRMED"
@@ -608,7 +608,7 @@ class OrchestratorAgent:
         opt_pct = stats.get("optical_water_percentage")
         sar_pct = stats.get("sar_water_percentage")
         opt_method = stats.get("optical_method", "")
-        opt_tool_name = "Optical Water Detector (NGRDI fallback)" if "NGRDI" in opt_method else "Optical Water Detector (NDWI)"
+        opt_tool_name = "Optical Water Detector (VWI fallback)" if ("Visible" in opt_method or "VWI" in opt_method or "NGRDI" in opt_method) else "Optical Water Detector (NDWI)"
         
         # -------------------------------------------------------------
         # A. SCENE DESCRIPTION / CAPTIONING
