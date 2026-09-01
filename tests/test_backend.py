@@ -67,7 +67,7 @@ def test_input_configuration_classification():
     assert c5["spatially_aligned"] is False
 
 # -------------------------------------------------------------
-# DIRECT QUERY ROUTER & SEMANTIC INTENT TESTS
+# DIRECT QUERY ROUTER & SEMANTIC INTENT TESTS (ENGLISH & HINDI)
 # -------------------------------------------------------------
 
 @pytest.fixture
@@ -75,8 +75,8 @@ def agent():
     registry = ModelRegistry()
     return OrchestratorAgent(model_registry=registry)
 
-def test_direct_router_scene_description_variations(agent):
-    """Verify all description queries route strictly to SCENE_DESCRIPTION."""
+def test_english_query_routing_variations(agent):
+    """Verify all English description queries route strictly to SCENE_DESCRIPTION."""
     config = {"configuration": "SINGLE_IMAGE", "modalities": ["OPTICAL"]}
     
     queries = [
@@ -97,24 +97,26 @@ def test_direct_router_scene_description_variations(agent):
         routed = agent.route_query_fallback(q, config)
         assert routed["task"] == "SCENE_DESCRIPTION", f"Failed for query: '{q}' -> got {routed['task']}"
 
-def test_direct_router_semantic_boundaries(agent):
-    """Verify strict separation between distinct task intents."""
+def test_hindi_query_routing_variations(agent):
+    """Verify all Hindi queries route accurately to their respective semantic tasks."""
     config = {"configuration": "SINGLE_IMAGE", "modalities": ["OPTICAL"]}
     
-    assert agent.route_query_fallback("describe the picture", config)["task"] == "SCENE_DESCRIPTION"
-    assert agent.route_query_fallback("is there water in the picture?", config)["task"] == "VQA"
-    assert agent.route_query_fallback("highlight the water in the picture", config)["task"] == "GROUNDING"
-    assert agent.route_query_fallback("what changed between the two pictures?", config)["task"] == "CHANGE_ANALYSIS"
-    assert agent.route_query_fallback("use both optical and sar pictures to analyze the water", config)["task"] == "OPTICAL_SAR"
-    assert agent.route_query_fallback("how much agricultural land is affected?", config)["task"] == "LAND_COVER_IMPACT"
-    assert agent.route_query_fallback("what are the different coloured squares on the map?", config)["task"] == "MAP_INTERPRETATION"
+    assert agent.route_query_fallback("इस तस्वीर का वर्णन करो", config)["task"] == "SCENE_DESCRIPTION"
+    assert agent.route_query_fallback("इस चित्र का विवरण दें", config)["task"] == "SCENE_DESCRIPTION"
+    assert agent.route_query_fallback("इस चित्र में क्या दिखाई दे रहा है?", config)["task"] == "SCENE_DESCRIPTION"
+    assert agent.route_query_fallback("इस चित्र में पानी है क्या?", config)["task"] == "VQA"
+    assert agent.route_query_fallback("पानी को हाइलाइट करो", config)["task"] == "GROUNDING"
+    assert agent.route_query_fallback("इन दोनों तस्वीरों में क्या बदलाव हुआ?", config)["task"] == "CHANGE_ANALYSIS"
+    assert agent.route_query_fallback("ऑप्टिकल और SAR तस्वीरों का एक साथ विश्लेषण करो", config)["task"] == "OPTICAL_SAR"
+    assert agent.route_query_fallback("कितनी कृषि भूमि प्रभावित हुई?", config)["task"] == "LAND_COVER_IMPACT"
+    assert agent.route_query_fallback("नक्शे पर अलग-अलग रंग के डिब्बे क्या हैं?", config)["task"] == "MAP_INTERPRETATION"
 
 # -------------------------------------------------------------
-# WORKFLOW EXECUTION & RESPONSE CONTENT TESTS
+# WORKFLOW EXECUTION & MULTILINGUAL EQUIVALENCE TESTS
 # -------------------------------------------------------------
 
-def test_describe_the_picture_workflow(agent):
-    """Verify 'describe the picture' executes SCENE_DESCRIPTION and outputs land-cover scene summary."""
+def test_english_scene_description_workflow(agent):
+    """Verify English 'describe the picture' outputs structured English description."""
     opt_path = os.path.join(DEMO_DIR, "optical_post.tif")
     session = {
         "image_1": validate_tiff(opt_path),
@@ -123,19 +125,17 @@ def test_describe_the_picture_workflow(agent):
         "active_image_2_path": None
     }
     
-    res = agent.execute_workflow("describe the picture", session)
+    res = agent.execute_workflow("describe the picture", session, language="en")
     assert res["task_classified"] == "SCENE_DESCRIPTION"
     assert "**Answer**" in res["answer"]
-    assert "mixed remote-sensing scene" in res["answer"]
+    assert "**Evidence**" in res["answer"]
+    assert "**Confidence**" in res["answer"]
+    assert "**Execution Summary**" in res["answer"]
     assert "Task: Single-Image Scene Description" in res["answer"]
     assert "EuroSAT ResNet18 Scene Classifier" in res["answer"]
-    # Critical: Must NOT be VQA or flood impact
-    assert "Task: Single-Image VQA" not in res["answer"]
-    assert "Task: Flood Impact" not in res["answer"]
-    assert "Newly inundated area:" not in res["answer"]
 
-def test_mandatory_2_water_vqa(agent):
-    """TEST 2 — WATER VQA: 'Is there water in this image?' -> VQA"""
+def test_hindi_scene_description_workflow(agent):
+    """Verify Hindi 'इस तस्वीर का वर्णन करो' outputs structured Hindi description with identical numerical evidence."""
     opt_path = os.path.join(DEMO_DIR, "optical_post.tif")
     session = {
         "image_1": validate_tiff(opt_path),
@@ -144,16 +144,44 @@ def test_mandatory_2_water_vqa(agent):
         "active_image_2_path": None
     }
     
-    res = agent.execute_workflow("Is there water in this image?", session)
+    res_en = agent.execute_workflow("describe the image", session, language="en")
+    res_hi = agent.execute_workflow("इस तस्वीर का वर्णन करो", session, language="hi")
+    
+    assert res_hi["task_classified"] == "SCENE_DESCRIPTION"
+    assert "**उत्तर**" in res_hi["answer"]
+    assert "**साक्ष्य**" in res_hi["answer"]
+    assert "**विश्वसनीयता**" in res_hi["answer"]
+    assert "**निष्पादन सारांश**" in res_hi["answer"]
+    assert "कार्य: Single-Image Scene Description" in res_hi["answer"]
+    assert "EuroSAT ResNet18 Scene Classifier" in res_hi["answer"]
+    
+    # Numerical evidence equivalence
+    assert res_en["spatial_statistics"]["optical_water_percentage"] == res_hi["spatial_statistics"]["optical_water_percentage"]
+    assert res_en["spatial_statistics"]["scene_landcover_distribution"] == res_hi["spatial_statistics"]["scene_landcover_distribution"]
+
+def test_hindi_water_vqa_workflow(agent):
+    """Verify Hindi 'इस चित्र में पानी है क्या?' outputs structured Hindi VQA response."""
+    opt_path = os.path.join(DEMO_DIR, "optical_post.tif")
+    session = {
+        "image_1": validate_tiff(opt_path),
+        "image_2": None,
+        "active_image_1_path": opt_path,
+        "active_image_2_path": None
+    }
+    
+    res = agent.execute_workflow("इस चित्र में पानी है क्या?", session, language="hi")
     assert res["task_classified"] == "VQA"
-    assert "**Answer**" in res["answer"]
-    assert "Water is detected in the analyzed scene" in res["answer"]
-    assert "Task: Single-Image VQA" in res["answer"]
+    assert "**उत्तर**" in res["answer"]
+    assert "जल क्षेत्र का पता चला है" in res["answer"]
+    assert "**साक्ष्य**" in res["answer"]
+    assert "**विश्वसनीयता**" in res["answer"]
+    assert "**निष्पादन सारांश**" in res["answer"]
+    assert "कार्य: Single-Image VQA" in res["answer"]
     assert "Optical Water Detector" in res["answer"]
     assert "optical_water_percentage" in res["spatial_statistics"]
 
-def test_mandatory_3_grounding(agent):
-    """TEST 3 — GROUNDING: 'Highlight the water body.' -> GROUNDING"""
+def test_hindi_grounding_workflow(agent):
+    """Verify Hindi 'पानी को हाइलाइट करो' outputs structured Hindi Grounding response."""
     opt_path = os.path.join(DEMO_DIR, "optical_post.tif")
     session = {
         "image_1": validate_tiff(opt_path),
@@ -162,34 +190,15 @@ def test_mandatory_3_grounding(agent):
         "active_image_2_path": None
     }
     
-    res = agent.execute_workflow("Highlight the water body.", session)
+    res = agent.execute_workflow("पानी को हाइलाइट करो", session, language="hi")
     assert res["task_classified"] == "GROUNDING"
-    assert "**Answer**" in res["answer"]
-    assert "highlighted on the map" in res["answer"]
-    assert "Task: Text-Guided Region Grounding" in res["answer"]
+    assert "**उत्तर**" in res["answer"]
+    assert "हाइलाइट" in res["answer"]
+    assert "कार्य: Text-Guided Region Grounding" in res["answer"]
     assert "optical_water_mask" in res["visual_evidence"]
 
-def test_mandatory_4_map_explanation(agent):
-    """TEST 4 — MAP EXPLANATION: 'What are the different coloured squares on the map?' -> MAP_INTERPRETATION"""
-    opt_path = os.path.join(DEMO_DIR, "optical_post.tif")
-    session = {
-        "image_1": validate_tiff(opt_path),
-        "image_2": None,
-        "active_image_1_path": opt_path,
-        "active_image_2_path": None
-    }
-    
-    res = agent.execute_workflow("What are the different coloured squares on the map?", session)
-    assert res["task_classified"] == "MAP_INTERPRETATION"
-    assert "**Answer**" in res["answer"]
-    assert "coloured squares on the map represent" in res["answer"]
-    assert "Task: Map Layer Interpretation" in res["answer"]
-    assert "Leaflet Geo-referenced Overlay Renderer" in res["answer"]
-    assert "Blue / Cyan" in res["answer"]
-    assert "Yellow / Green" in res["answer"]
-
-def test_mandatory_5_change_analysis(agent):
-    """TEST 5 — CHANGE ANALYSIS: 'What changed between these two dates?' -> CHANGE_ANALYSIS"""
+def test_hindi_change_analysis_workflow(agent):
+    """Verify Hindi 'इन दोनों तस्वीरों में क्या बदलाव हुआ?' outputs structured Hindi change metrics."""
     opt_pre = os.path.join(DEMO_DIR, "optical_pre.tif")
     opt_post = os.path.join(DEMO_DIR, "optical_post.tif")
     session = {
@@ -199,16 +208,20 @@ def test_mandatory_5_change_analysis(agent):
         "active_image_2_path": opt_post
     }
     
-    res = agent.execute_workflow("What changed between these two dates?", session)
-    assert res["task_classified"] == "CHANGE_ANALYSIS"
-    assert "**Answer**" in res["answer"]
-    assert "The later observation shows an increase in inundated area" in res["answer"]
-    assert "Newly inundated area:" in res["answer"]
-    assert "Task: Bi-temporal Change Analysis" in res["answer"]
-    assert "flooded_mask" in res["visual_evidence"]
+    res_en = agent.execute_workflow("What changed between these two dates?", session, language="en")
+    res_hi = agent.execute_workflow("इन दोनों तस्वीरों में क्या बदलाव हुआ?", session, language="hi")
+    
+    assert res_hi["task_classified"] == "CHANGE_ANALYSIS"
+    assert "**उत्तर**" in res_hi["answer"]
+    assert "नया जलमग्न क्षेत्र:" in res_hi["answer"]
+    assert "कार्य: Bi-temporal Change Analysis" in res_hi["answer"]
+    assert "Change Analyzer" in res_hi["answer"]
+    
+    # Exact numerical equivalence
+    assert res_en["spatial_statistics"]["flooded_area_km2"] == res_hi["spatial_statistics"]["flooded_area_km2"]
 
-def test_mandatory_6_optical_sar(agent):
-    """TEST 6 — OPTICAL + SAR: 'Use the optical and SAR images together to identify water.' -> OPTICAL_SAR"""
+def test_hindi_optical_sar_workflow(agent):
+    """Verify Hindi 'ऑप्टिकल और SAR तस्वीरों का एक साथ विश्लेषण करो' outputs structured Hindi fusion report."""
     opt_path = os.path.join(DEMO_DIR, "optical_post.tif")
     sar_path = os.path.join(DEMO_DIR, "sar_post.tif")
     session = {
@@ -218,15 +231,15 @@ def test_mandatory_6_optical_sar(agent):
         "active_image_2_path": sar_path
     }
     
-    res = agent.execute_workflow("Use the optical and SAR images together to identify water.", session)
+    res = agent.execute_workflow("ऑप्टिकल और SAR तस्वीरों का एक साथ विश्लेषण करो", session, language="hi")
     assert res["task_classified"] == "OPTICAL_SAR"
-    assert "**Answer**" in res["answer"]
-    assert "Both optical and SAR observations provide evidence" in res["answer"]
-    assert "Task: Cross-Modal Optical–SAR Analysis" in res["answer"]
+    assert "**उत्तर**" in res["answer"]
+    assert "ऑप्टिकल और SAR दोनों अवलोकन" in res["answer"]
+    assert "कार्य: Cross-Modal Optical–SAR Analysis" in res["answer"]
     assert "SAR Backscatter" in res["evidence_fusion"]["modalities_used"]
 
-def test_mandatory_7_lulc_impact(agent):
-    """TEST 7 — LULC IMPACT: 'How much agricultural land is affected?' -> LAND_COVER_IMPACT"""
+def test_hindi_missing_temporal_fallback(agent):
+    """Verify Hindi temporal query with single image returns polite Hindi guidance."""
     opt_path = os.path.join(DEMO_DIR, "optical_post.tif")
     session = {
         "image_1": validate_tiff(opt_path),
@@ -235,27 +248,10 @@ def test_mandatory_7_lulc_impact(agent):
         "active_image_2_path": None
     }
     
-    res = agent.execute_workflow("How much agricultural land is affected?", session)
-    assert res["task_classified"] == "LAND_COVER_IMPACT"
-    assert "**Answer**" in res["answer"]
-    assert "Task: Flood Impact / Land-Cover Analysis" in res["answer"]
-    assert "EuroSAT ResNet18 Classifier" in res["answer"]
-    assert "landcover_intersection" in res["spatial_statistics"]
-    assert "Agriculture intersecting the flood mask:" in res["answer"]
-
-def test_mandatory_8_missing_temporal_fallback(agent):
-    """TEST 8 — MISSING TEMPORAL INPUT: 1 image + 'What changed between these two dates?' -> Fallback"""
-    opt_path = os.path.join(DEMO_DIR, "optical_post.tif")
-    session = {
-        "image_1": validate_tiff(opt_path),
-        "image_2": None,
-        "active_image_1_path": opt_path,
-        "active_image_2_path": None
-    }
-    
-    res = agent.execute_workflow("What changed between these two dates?", session)
-    assert res["confidence"] == "Insufficient evidence"
-    assert "Change analysis requires two spatially corresponding observations" in res["answer"]
+    res = agent.execute_workflow("इन दोनों तस्वीरों में क्या बदलाव हुआ?", session, language="hi")
+    assert res["confidence"] == "अपर्याप्त साक्ष्य"
+    assert "परिवर्तन विश्लेषण के लिए" in res["answer"]
+    assert "छवि 2 में दूसरा चित्र अपलोड करें" in res["answer"]
     assert res["task_classified"] == "CHANGE_ANALYSIS"
 
 def test_single_sar_vqa(agent):

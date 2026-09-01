@@ -89,11 +89,12 @@ export default function App() {
   const [spatialAligned, setSpatialAligned] = useState<boolean>(false);
   
   // App UI states
+  const [language, setLanguage] = useState<'en' | 'hi'>('en');
   const [query, setQuery] = useState('');
   const [messages, setMessages] = useState<Message[]>([
     {
       sender: 'system',
-      text: "🛰️ Welcome to SatQuery AI (ISRO PS 26167). Upload a single satellite image (Optical or SAR) to begin VQA and grounding, or add a second observation for cross-modal fusion or temporal change detection.",
+      text: "🛰️ Welcome to SatQuery AI (ISRO PS 26167). Upload a single satellite image (Optical or SAR) to begin VQA and grounding, or add a second observation for cross-modal fusion or temporal change detection.\n\n🇮🇳 SatQuery AI में आपका स्वागत है। उपग्रह चित्र अपलोड करके विश्लेषण शुरू करें।",
       timestamp: new Date().toLocaleTimeString()
     }
   ]);
@@ -384,7 +385,8 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           query: textToSend,
-          session_id: sessionId
+          session_id: sessionId,
+          language: language
         })
       });
       
@@ -448,13 +450,46 @@ export default function App() {
             <h1 className="text-base font-bold tracking-tight text-white flex items-center gap-2">
               🛰️ SatQuery AI
             </h1>
-            <span className="rounded bg-brand-darkBlue px-1.5 py-0.5 text-[10px] font-bold text-brand-cyan border border-brand-blue/30">
-              ISRO PS 26167
+            <div className="flex items-center gap-1">
+              <span className="rounded bg-brand-darkBlue px-1.5 py-0.5 text-[10px] font-bold text-brand-cyan border border-brand-blue/30">
+                ISRO PS 26167
+              </span>
+            </div>
+          </div>
+
+          {/* Language Selection Toggle */}
+          <div className="mb-3 flex items-center justify-between bg-[#0d0f12] p-1 rounded-md border border-[#30363d]">
+            <span className="text-[10px] font-bold text-slate-400 pl-1 uppercase tracking-wider">
+              {language === 'hi' ? 'भाषा (Language)' : 'Language'}
             </span>
+            <div className="flex gap-1">
+              <button
+                onClick={() => setLanguage('en')}
+                className={`px-2 py-0.5 rounded text-[10px] font-bold transition ${
+                  language === 'en'
+                    ? 'bg-brand-blue text-white shadow'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                🇬🇧 English
+              </button>
+              <button
+                onClick={() => setLanguage('hi')}
+                className={`px-2 py-0.5 rounded text-[10px] font-bold transition ${
+                  language === 'hi'
+                    ? 'bg-brand-blue text-white shadow'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                🇮🇳 हिन्दी
+              </button>
+            </div>
           </div>
           
           <p className="text-xs text-slate-400 mb-4 leading-relaxed">
-            Agentic Vision-Language Assistant for Multimodal Remote Sensing.
+            {language === 'hi'
+              ? 'बहु-मॉडल रिमोट सेंसिंग के लिए एजेंटिक विज़न-लैंग्वेज सहायक।'
+              : 'Agentic Vision-Language Assistant for Multimodal Remote Sensing.'}
           </p>
 
           {/* Quick Scenario Pre-sets */}
@@ -795,36 +830,43 @@ export default function App() {
           {/* Quick-Prompt Scenario Matrix */}
           <div className="p-3 bg-[#0d0f12] border-t border-[#30363d] shrink-0 space-y-2">
             <div className="text-[10px] font-bold text-slate-400 tracking-wide uppercase flex items-center gap-1">
-              <Info className="h-3 w-3 text-brand-cyan" /> PS 26167 SCENARIO SHORTCUTS
+              <Info className="h-3 w-3 text-brand-cyan" /> {language === 'hi' ? 'PS 26167 परिदृश्य शॉर्टकट' : 'PS 26167 SCENARIO SHORTCUTS'}
             </div>
             <div className="grid grid-cols-2 gap-1.5 text-[10px]">
               <button 
-                onClick={() => handleQuery("Is there water in this image?")}
+                onClick={() => handleQuery(language === 'hi' ? "इस तस्वीर का वर्णन करो" : "Describe the image")}
                 disabled={loading || !image1}
                 className="text-left p-1.5 rounded bg-[#161b22] hover:bg-slate-800 border border-[#30363d] text-slate-300 hover:text-white truncate disabled:opacity-40"
               >
-                1. Single-Image VQA
+                {language === 'hi' ? '1. दृश्य विवरण (Scene Desc)' : '1. Scene Description'}
               </button>
               <button 
-                onClick={() => handleQuery("Highlight the water body")}
+                onClick={() => handleQuery(language === 'hi' ? "इस चित्र में पानी है क्या?" : "Is there water in this image?")}
                 disabled={loading || !image1}
                 className="text-left p-1.5 rounded bg-[#161b22] hover:bg-slate-800 border border-[#30363d] text-slate-300 hover:text-white truncate disabled:opacity-40"
               >
-                2. Flood Grounding
+                {language === 'hi' ? '2. जल प्रश्न (Water VQA)' : '2. Water VQA'}
               </button>
               <button 
-                onClick={() => handleQuery("What changed after the flood?")}
+                onClick={() => handleQuery(language === 'hi' ? "पानी को हाइलाइट करो" : "Highlight the water body")}
+                disabled={loading || !image1}
+                className="text-left p-1.5 rounded bg-[#161b22] hover:bg-slate-800 border border-[#30363d] text-slate-300 hover:text-white truncate disabled:opacity-40"
+              >
+                {language === 'hi' ? '3. जल ग्राउंडिंग (Grounding)' : '3. Water Grounding'}
+              </button>
+              <button 
+                onClick={() => handleQuery(language === 'hi' ? "इन दोनों तस्वीरों में क्या बदलाव हुआ?" : "What changed between these two dates?")}
+                disabled={loading || !image1}
+                className="text-left p-1.5 rounded bg-[#161b22] hover:bg-slate-800 border border-[#30363d] text-slate-300 hover:text-white truncate disabled:opacity-40"
+              >
+                {language === 'hi' ? '4. परिवर्तन विश्लेषण (Change)' : '4. Change Analysis'}
+              </button>
+              <button 
+                onClick={() => handleQuery(language === 'hi' ? "ऑप्टिकल और SAR तस्वीरों का एक साथ विश्लेषण करो" : "Use optical and SAR images together to identify water")}
                 disabled={loading || !image1}
                 className="text-left p-1.5 rounded bg-[#161b22] hover:bg-slate-800 border border-[#30363d] text-slate-300 hover:text-white truncate disabled:opacity-40 col-span-2"
               >
-                3. Bi-Temporal Flood Change
-              </button>
-              <button 
-                onClick={() => handleQuery("Use the optical and SAR images together to identify inundated regions and calculate affected agriculture")}
-                disabled={loading || !image1}
-                className="text-left p-1.5 rounded bg-[#161b22] hover:bg-slate-800 border border-[#30363d] text-slate-300 hover:text-white truncate disabled:opacity-40 col-span-2"
-              >
-                4. Optical + SAR Cross-Modal Fusion
+                {language === 'hi' ? '5. ऑप्टिकल + SAR क्रॉस-मोडल विश्लेषण' : '5. Optical + SAR Cross-Modal Fusion'}
               </button>
             </div>
           </div>
@@ -837,7 +879,7 @@ export default function App() {
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleQuery()}
-                placeholder="Ask what happened, where, or what was affected..."
+                placeholder={language === 'hi' ? "पूछें क्या हुआ, कहाँ हुआ, या क्या प्रभावित हुआ..." : "Ask what happened, where, or what was affected..."}
                 className="flex-1 rounded border border-[#30363d] bg-[#0d0f12] px-3 py-1.5 text-xs text-slate-100 placeholder-slate-500 focus:border-brand-blue focus:outline-none"
               />
               <button
@@ -845,7 +887,7 @@ export default function App() {
                 disabled={loading || !image1}
                 className="rounded bg-brand-blue px-4 py-1.5 text-xs font-semibold text-white hover:bg-brand-blue/90 disabled:opacity-50"
               >
-                Query
+                {language === 'hi' ? 'पूछें' : 'Query'}
               </button>
             </div>
           </div>

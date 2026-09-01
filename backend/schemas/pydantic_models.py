@@ -31,6 +31,7 @@ class SessionState(BaseModel):
 class QueryRequest(BaseModel):
     query: str
     session_id: str
+    language: Optional[str] = "en" # "en" (English) or "hi" (हिन्दी)
 
 class ExecutionStep(BaseModel):
     step_number: int

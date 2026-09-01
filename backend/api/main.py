@@ -174,7 +174,7 @@ async def query_satquery(request: QueryRequest):
     session = SESSIONS[session_id]
     
     try:
-        result = orchestrator.execute_workflow(request.query, session)
+        result = orchestrator.execute_workflow(request.query, session, language=request.language or "en")
         
         session["analyses"].append({
             "query": request.query,
