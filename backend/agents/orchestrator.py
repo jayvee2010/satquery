@@ -12,8 +12,9 @@ class OrchestratorAgent:
     """
     Cognitive Orchestrator for SatQuery AI (ISRO PS 26167):
     - Strictly routes user queries to the specific semantic task requested.
-    - Supports Single Image (Optical or SAR), Cross-Modal Pairs (Optical + SAR), and Bi-Temporal Pairs (Before + After).
-    - Prevents query-task mismatch (e.g. 'Describe the image' routes to SCENE_DESCRIPTION, not flood impact).
+    - Accurately classifies "describe the picture" / "describe the image" into SCENE_DESCRIPTION.
+    - Prevents query-task mismatch (e.g. scene description will not become water VQA or flood impact).
+    - Accurately reflects executed tools (e.g. NGRDI fallback vs NDWI).
     - Distinguishes detected water bodies from newly inundated flood expansion.
     - Generates concise, evidence-grounded ISRO PS 26167 formatted responses without hallucinations.
     """
@@ -48,53 +49,63 @@ class OrchestratorAgent:
             "explain the map", "map legend", "symbology", "overlay mean", "layer mean"
         ]
         if any(k in q for k in map_keywords) or (("square" in q or "color" in q or "colour" in q) and "map" in q):
-            task = "MAP_INTERPRETATION"
-            reasoning = "Query asks to interpret map visualization layers, symbology, or colored squares."
+            return {
+                "task": "MAP_INTERPRETATION",
+                "parameters": {"optical_threshold": 0.05, "sar_threshold_db": -18.0},
+                "reasoning": "Query asks to interpret map visualization layers, symbology, or colored squares."
+            }
             
-        # 2. SCENE DESCRIPTION / CAPTIONING (e.g. "Describe the image", "What does this image show?")
-        elif any(q.startswith(k) or k in q for k in [
-            "describe the image", "describe this image", "describe the scene", "describe this scene", 
-            "what does this image show", "what is visible in this image", "what is visible here",
-            "give me a scene description", "what can you see here", "summarize the image", 
-            "summary of the image", "what are the major features in this image", "caption the image",
-            "scene description", "describe image", "summarize image"
-        ]) and not any(k in q for k in ["change", "before", "after", "sar", "radar", "affect", "impact", "flood", "damage", "highlight", "square"]):
-            task = "SCENE_DESCRIPTION"
-            reasoning = "Query requests objective single-image scene description / captioning."
+        # 2. BI-TEMPORAL CHANGE ANALYSIS (e.g. "What changed?", "Compare these images")
+        if any(k in q for k in ["change", "before", "after", "previous", "increase", "expansion", "between these two", "between two", "compare these", "compare the", "earlier", "later"]):
+            return {
+                "task": "CHANGE_ANALYSIS",
+                "parameters": {"optical_threshold": 0.05, "sar_threshold_db": -18.0},
+                "reasoning": "Query requests bi-temporal change comparison."
+            }
             
-        # 3. BI-TEMPORAL CHANGE ANALYSIS (e.g. "What changed?", "Compare these images")
-        elif any(k in q for k in ["change", "before", "after", "previous", "increase", "expansion", "between these two", "compare these", "compare the"]):
-            task = "CHANGE_ANALYSIS"
-            reasoning = "Query requests bi-temporal change comparison."
+        # 3. CROSS-MODAL OPTICAL + SAR (e.g. "Use optical and SAR together")
+        if ("sar" in q or "radar" in q) and any(k in q for k in ["optical", "together", "both", "fusion", "corroborate", "reveal", "combine", "modality", "modalities"]):
+            return {
+                "task": "OPTICAL_SAR",
+                "parameters": {"optical_threshold": 0.05, "sar_threshold_db": -18.0},
+                "reasoning": "Query requests cross-modal optical + SAR fusion analysis."
+            }
             
-        # 4. CROSS-MODAL OPTICAL + SAR (e.g. "Use optical and SAR together")
-        elif ("sar" in q or "radar" in q) and any(k in q for k in ["optical", "together", "both", "fusion", "corroborate", "reveal", "combine", "modality", "modalities"]):
-            task = "OPTICAL_SAR"
-            reasoning = "Query requests cross-modal optical + SAR fusion analysis."
+        # 4. LAND COVER IMPACT ANALYSIS (e.g. "Which agricultural areas were affected?", "Rescue priority")
+        if any(k in q for k in ["affected", "impact", "rescue", "priority", "priorit", "go to", "send", "damage", "intersect"]) or \
+           (any(k in q for k in ["agri", "crop", "built", "urban", "forest", "infrastructure", "settlement"]) and any(w in q for w in ["flood", "inundat", "affect", "impact", "loss", "how much", "which"])):
+            return {
+                "task": "LAND_COVER_IMPACT",
+                "parameters": {"optical_threshold": 0.05, "sar_threshold_db": -18.0},
+                "reasoning": "Query explicitly asks for land-cover impact / flood intersection / rescue prioritization."
+            }
             
-        # 5. LAND COVER IMPACT ANALYSIS (e.g. "Which agricultural areas were affected?", "Rescue priority")
-        elif any(k in q for k in ["affected", "impact", "rescue", "priority", "priorit", "go to", "send", "damage", "intersect"]) or \
-             (any(k in q for k in ["agri", "crop", "built", "urban", "forest", "infrastructure", "settlement"]) and any(w in q for w in ["flood", "inundat", "affect", "impact", "loss", "how much", "which"])):
-            task = "LAND_COVER_IMPACT"
-            reasoning = "Query explicitly asks for land-cover impact / flood intersection / rescue prioritization."
+        # 5. TEXT-GUIDED REGION GROUNDING (e.g. "Highlight the water body", "Where is the river?")
+        if any(k in q for k in ["highlight", "where is", "where are", "show me", "mark the", "locate the", "mask"]):
+            return {
+                "task": "GROUNDING",
+                "parameters": {"optical_threshold": 0.05, "sar_threshold_db": -18.0},
+                "reasoning": "Query requests text-guided spatial region grounding."
+            }
             
-        # 6. TEXT-GUIDED REGION GROUNDING (e.g. "Highlight the water body", "Where is the river?")
-        elif any(k in q for k in ["highlight", "where is", "where are", "show me", "mark the", "locate the", "mask"]):
-            task = "GROUNDING"
-            reasoning = "Query requests text-guided spatial region grounding."
+        # 6. SCENE DESCRIPTION / CAPTIONING (e.g. "Describe the picture", "Describe the image", "What does this image show?")
+        desc_triggers = [
+            "describe", "description", "summarize", "summary", "caption",
+            "what does this", "what is visible", "what can you see", "what do you see",
+            "what is shown", "tell me about", "overview", "major features"
+        ]
+        if any(k in q for k in desc_triggers):
+            return {
+                "task": "SCENE_DESCRIPTION",
+                "parameters": {"optical_threshold": 0.05, "sar_threshold_db": -18.0},
+                "reasoning": "Query requests objective single-image scene description / captioning."
+            }
             
-        # 7. SINGLE-IMAGE VQA (e.g. "Is there water in this image?", "Are there buildings?")
-        else:
-            task = "VQA"
-            reasoning = "Query is a direct visual question (VQA) about feature presence."
-            
+        # 7. SINGLE-IMAGE VQA (e.g. "Is there water in this image?", "Are there buildings?", "How much water is present?")
         return {
-            "task": task,
-            "parameters": {
-                "optical_threshold": 0.05,
-                "sar_threshold_db": -18.0
-            },
-            "reasoning": reasoning
+            "task": "VQA",
+            "parameters": {"optical_threshold": 0.05, "sar_threshold_db": -18.0},
+            "reasoning": "Query is a direct visual question (VQA) about feature presence."
         }
 
     def route_query(self, query: str, config_info: dict) -> dict:
@@ -108,11 +119,11 @@ class OrchestratorAgent:
         You are the routing agent for SatQuery AI (ISRO Problem Statement 26167).
         Classify the user's remote sensing query into one of these 7 specific tasks:
         
-        1. SCENE_DESCRIPTION: Objective description or summary of image features / land cover (e.g. "Describe the image", "What does this image show?", "Give me a scene description")
-        2. VQA: Visual Question Answering on single image (e.g. "Is there water in this image?", "Are there buildings?", "Is vegetation present?")
-        3. GROUNDING: Spatial localization & region masking (e.g. "Highlight the water body", "Show me the river", "Where is the water?")
-        4. CHANGE_ANALYSIS: Temporal change detection between observations (e.g. "What changed?", "What changed between these two dates?", "Where did flooding increase?")
-        5. OPTICAL_SAR: Multi-modal fusion of optical & SAR (e.g. "Use optical and SAR together", "Combine optical and SAR to identify water")
+        1. SCENE_DESCRIPTION: Objective description or summary of image features / land cover (e.g. "Describe the image", "Describe the picture", "What does this image show?", "What is visible here?", "Give me a scene description", "Summarize this picture")
+        2. VQA: Visual Question Answering on single image asking a specific question (e.g. "Is there water in this image?", "Are there buildings?", "Is vegetation present?", "How much water is present?")
+        3. GROUNDING: Spatial localization & region masking (e.g. "Highlight the water body", "Show me the river", "Where is the water?", "Mark the flooded area")
+        4. CHANGE_ANALYSIS: Temporal change detection between observations (e.g. "What changed?", "What changed between these two dates?", "Where did flooding increase?", "Compare the before and after images")
+        5. OPTICAL_SAR: Multi-modal fusion of optical & SAR (e.g. "Use optical and SAR together", "Combine optical and SAR to identify water", "Use both modalities")
         6. LAND_COVER_IMPACT: Intersecting flood extent with land use classes or rescue prioritization (e.g. "Which agricultural areas were affected?", "How much agricultural land was flooded?", "Where should rescue teams go?")
         7. MAP_INTERPRETATION: Explaining map layers, colors, or squares on the Leaflet display (e.g. "What are the different coloured squares on the map?", "What do the colors on the map mean?")
         
@@ -305,7 +316,7 @@ class OrchestratorAgent:
             primary_opt = opt_images[-1]
             trace.append({
                 "step_number": step_idx,
-                "name": "Optical Water Extraction (NDWI)",
+                "name": "Optical Water Extraction",
                 "status": "SUCCESS",
                 "details": f"Executing spectral index calculation on {primary_opt['meta']['filename']}..."
             })
@@ -320,7 +331,7 @@ class OrchestratorAgent:
                 visual_evidence["ndwi_grid"] = opt_water.get("ndwi_grid")
                 spatial_stats["optical_water_percentage"] = opt_water["water_percentage"]
                 spatial_stats["optical_method"] = opt_water["method"]
-                modalities_used.append("Optical (NDWI)")
+                modalities_used.append("Optical Index")
                 if opt_water.get("limitations") and task not in ["MAP_INTERPRETATION"]:
                     limitations.extend(opt_water["limitations"])
             except Exception as e:
@@ -482,8 +493,9 @@ class OrchestratorAgent:
         status = "INSUFFICIENT"
         
         if opt_water:
-            modalities_used.append("Optical (NDWI)")
-            opt_findings = f"NDWI water detection: {opt_water['water_percentage']:.1%} scene area."
+            opt_method_short = "NGRDI" if "NGRDI" in opt_water.get("method", "") else "NDWI"
+            modalities_used.append(f"Optical ({opt_method_short})")
+            opt_findings = f"{opt_method_short} water detection: {opt_water['water_percentage']:.1%} scene area."
             status = "CONFIRMED"
             
         if sar_water:
@@ -551,25 +563,31 @@ class OrchestratorAgent:
         
         opt_pct = stats.get("optical_water_percentage")
         sar_pct = stats.get("sar_water_percentage")
+        opt_method = stats.get("optical_method", "")
+        opt_tool_name = "Optical Water Detector (NGRDI fallback)" if "NGRDI" in opt_method else "Optical Water Detector (NDWI)"
         
         # -------------------------------------------------------------
         # A. SCENE DESCRIPTION / CAPTIONING
         # -------------------------------------------------------------
         if task == "SCENE_DESCRIPTION":
-            direct_answer = "The scene contains a mixture of agricultural land, natural vegetation, built-up areas, and water-covered regions."
             dist = stats.get("scene_landcover_distribution")
             if dist:
+                top_cats = [cat.lower() for cat, pct in dist.items() if pct > 3.0]
+                cats_text = ", ".join(top_cats)
+                direct_answer = f"The image shows a mixed remote-sensing scene containing predominantly {cats_text}. The spatial distribution of the detected regions is shown on the map."
                 classes_str = ", ".join([f"{cat} ({pct:.1f}%)" for cat, pct in dist.items() if pct > 1.0])
                 evidence_items.append(f"Land-cover classes identified: {classes_str}.")
             else:
+                direct_answer = "The image shows a mixed remote-sensing scene containing agricultural and vegetated regions with distinct surface features. The spatial distribution of the detected regions is shown on the map."
                 evidence_items.append("Optical surface reflectance indicates predominantly agricultural fields and vegetation.")
+                
             if opt_pct is not None:
-                evidence_items.append(f"Water surface coverage: {opt_pct:.1%} of the scene.")
+                evidence_items.append(f"Water surface coverage: {opt_pct:.1%} of the scene area.")
             evidence_items.append("Spatial distribution is displayed on the workstation map.")
             
             tools_used.append("EuroSAT ResNet18 Scene Classifier")
             if opt_pct is not None:
-                tools_used.append("Optical Water Detector (NDWI)")
+                tools_used.append(opt_tool_name)
             parameters_used.append("Patch size: 64x64 pixels")
             parameters_used.append("Taxonomy: EuroSAT 10-Class Consolidated")
             outputs_list.append("Multi-class land-cover distribution mapped")
@@ -603,8 +621,8 @@ class OrchestratorAgent:
                     
                 if opt_pct is not None:
                     evidence_items.append(f"Water detected across {opt_pct:.1%} of the analyzed optical scene.")
-                    tools_used.append("Optical Water Detector (NDWI)")
-                    parameters_used.append(f"NDWI threshold: {params.get('optical_threshold', 0.05)}")
+                    tools_used.append(opt_tool_name)
+                    parameters_used.append(f"Threshold: {params.get('optical_threshold', 0.05)}")
                     outputs_list.append(f"Optical water coverage: {opt_pct:.1%}")
                 if sar_pct is not None:
                     evidence_items.append(f"SAR low-backscatter water signature detected across {sar_pct:.1%} of the scene.")
@@ -625,9 +643,9 @@ class OrchestratorAgent:
             if opt_pct is not None:
                 evidence_items.append("Optical water mask generated from the analyzed imagery.")
                 evidence_items.append(f"Water detected across {opt_pct * 100:.1f}% of the scene.")
-                tools_used.append("Optical Water Detector")
+                tools_used.append(opt_tool_name)
                 tools_used.append("Spatial Mask Generator")
-                parameters_used.append(f"NDWI threshold: {params.get('optical_threshold', 0.05)}")
+                parameters_used.append(f"Threshold: {params.get('optical_threshold', 0.05)}")
                 outputs_list.append(f"Water mask extent: {opt_pct * 100:.1f}%")
             if sar_pct is not None and opt_pct is None:
                 evidence_items.append("SAR low-backscatter water mask generated from radar observation.")
@@ -651,9 +669,9 @@ class OrchestratorAgent:
                 evidence_items.append(f"Receded water area: {stats['receded_area_km2']:.3f} km².")
             evidence_items.append("The detected change region is shown on the map.")
             
-            tools_used.append("Optical Water Detector")
+            tools_used.append(opt_tool_name)
             tools_used.append("Change Analyzer")
-            parameters_used.append(f"NDWI threshold: {params.get('optical_threshold', 0.05)}")
+            parameters_used.append(f"Threshold: {params.get('optical_threshold', 0.05)}")
             parameters_used.append("Difference method: Logical mask subtraction (post & ~pre)")
             outputs_list.append(f"Newly inundated area: {flood_km2:.3f} km²")
 
@@ -670,7 +688,7 @@ class OrchestratorAgent:
             if fusion.get("agreement_status") == "PARTIAL":
                 evidence_items.append("SAR detected water signatures under cloud-obscured sectors where optical NDWI was obstructed.")
                 
-            tools_used.append("Optical Water Detector (NDWI)")
+            tools_used.append(opt_tool_name)
             tools_used.append("SAR Water Detector (Low-Backscatter)")
             tools_used.append("Optical–SAR Evidence Fusion")
             parameters_used.append(f"Optical threshold: {params.get('optical_threshold', 0.05)}")
@@ -701,7 +719,7 @@ class OrchestratorAgent:
             if "total_area_affected_km2" in stats:
                 evidence_items.append(f"Total flooded land area: {stats['total_area_affected_km2']:.3f} km².")
                 
-            tools_used.append("Optical Water Detector")
+            tools_used.append(opt_tool_name)
             if sar_pct is not None:
                 tools_used.append("SAR Water Detector")
             tools_used.append("EuroSAT ResNet18 Classifier")
