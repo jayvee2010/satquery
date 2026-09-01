@@ -32,20 +32,9 @@ def train_model():
         full_dataset = datasets.EuroSAT(root=data_dir, download=True, transform=transform)
         print(f"EuroSAT loaded successfully. Total images: {len(full_dataset)}")
     except Exception as e:
-        print(f"Error downloading/loading EuroSAT: {str(e)}")
-        print("Falling back to simulated training set for lightweight local setup...")
-        # Fallback: create a mock dataset to allow offline or errored builds to complete
-        class MockDataset(torch.utils.data.Dataset):
-            def __init__(self, transform=None):
-                self.transform = transform
-                self.classes = ["AnnualCrop", "Forest", "HerbaceousVegetation", "Highway", "Industrial", "Pasture", "PermanentCrop", "Residential", "River", "SeaLake"]
-            def __len__(self):
-                return 100
-            def __getitem__(self, idx):
-                x = torch.randn(3, 64, 64)
-                y = idx % 10
-                return x, y
-        full_dataset = MockDataset(transform=transform)
+        print(f"\n[CRITICAL ERROR] Failed to download/load EuroSAT dataset: {str(e)}")
+        print("TRAINING FAILED: A genuine remote-sensing dataset is strictly required for model adaptation.")
+        raise RuntimeError(f"TRAINING FAILED: Could not obtain EuroSAT dataset ({str(e)}). Please verify internet connectivity.")
         
     # 4. Create a 10% subset to train quickly (respecting compute constraints)
     indices = list(range(len(full_dataset)))

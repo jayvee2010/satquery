@@ -4,12 +4,12 @@ import uuid
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from backend.schemas.pydantic_models import QueryRequest, QueryResponse, SessionState
 from backend.models.registry import ModelRegistry
 from backend.agents.orchestrator import OrchestratorAgent
-from backend.tools.geospatial import validate_tiff
+from backend.tools.geospatial import validate_tiff, classify_input_configuration
 
 from fastapi.staticfiles import StaticFiles
 
@@ -23,8 +23,8 @@ os.makedirs(DEMO_DIR, exist_ok=True)
 # Initialize FastAPI App
 app = FastAPI(
     title="SatQuery AI API",
-    description="Agentic Satellite Intelligence API for Flood Investigation",
-    version="1.0.0"
+    description="Agentic Remote Sensing Vision-Language Assistant (ISRO PS 26167)",
+    version="2.0.0"
 )
 
 # CORS Configuration
@@ -39,11 +39,10 @@ app.add_middleware(
 # Serve demo imagery static files
 app.mount("/api/demo", StaticFiles(directory=DEMO_DIR), name="demo")
 
-# Shared memory session storage (will reset on server restart)
+# Shared memory session storage
 SESSIONS: Dict[str, Dict[str, Any]] = {}
 
 # Initialize Registry and Orchestrator
-# Determine weights path
 MODEL_DIR = os.path.join(BASE_DIR, "backend", "models")
 weights_path = os.path.join(MODEL_DIR, "adapted_rs_model.pth")
 registry = ModelRegistry(adapted_model_path=weights_path)
@@ -60,77 +59,105 @@ def list_models():
 
 @app.get("/api/session/{session_id}")
 def get_session(session_id: str):
-    """Retrieves session state."""
+    """Retrieves session state, active images, and input configuration."""
     if session_id not in SESSIONS:
-        # Initialize empty session
         SESSIONS[session_id] = {
             "session_id": session_id,
-            "optical_pre": None,
-            "optical_post": None,
-            "sar_post": None,
-            "active_optical_pre_path": None,
-            "active_optical_post_path": None,
-            "active_sar_post_path": None,
+            "image_1": None,
+            "image_2": None,
+            "active_image_1_path": None,
+            "active_image_2_path": None,
+            "configuration": "EMPTY",
+            "detected_modalities": [],
+            "spatial_alignment": False,
             "analyses": []
         }
     
-    # Return serializable state (exclude file paths for frontend security)
     state = SESSIONS[session_id]
+    config_info = classify_input_configuration(state.get("image_1"), state.get("image_2"))
+    
     return {
         "session_id": state["session_id"],
-        "optical_pre": state["optical_pre"],
-        "optical_post": state["optical_post"],
-        "sar_post": state["sar_post"]
+        "image_1": state.get("image_1"),
+        "image_2": state.get("image_2"),
+        "configuration": config_info["configuration"],
+        "detected_modalities": config_info.get("modalities", []),
+        "spatial_alignment": config_info.get("spatially_aligned", False),
+        "details": config_info.get("details", "")
     }
 
 @app.post("/api/upload")
 async def upload_file(
     file: UploadFile = File(...),
-    modality: str = Form(...), # "optical_pre", "optical_post", "sar_post"
+    slot: Optional[str] = Form(None), # "image_1", "image_2"
+    modality: Optional[str] = Form(None), # legacy compatibility
     session_id: str = Form(...)
 ):
     """
-    Uploads a satellite image for a session, validates its GeoTIFF metadata,
-    and stores it securely.
+    Uploads a satellite image (GeoTIFF), validates its geospatial metadata,
+    infers its sensor modality, and updates the workspace configuration.
     """
-    if modality not in ["optical_pre", "optical_post", "sar_post"]:
-        raise HTTPException(status_code=400, detail="Invalid modality type. Must be 'optical_pre', 'optical_post', or 'sar_post'.")
+    # Resolve target slot
+    target_slot = slot or modality or "image_1"
+    if target_slot in ["optical_post", "optical", "sar"]:
+        target_slot = "image_1"
+    elif target_slot in ["optical_pre", "sar_post"]:
+        target_slot = "image_2"
         
-    # Check session
+    if target_slot not in ["image_1", "image_2"]:
+        target_slot = "image_1"
+
     if session_id not in SESSIONS:
-        get_session(session_id) # initializes session
+        get_session(session_id)
         
-    # Create session directory
     session_dir = os.path.join(DATA_DIR, session_id)
     os.makedirs(session_dir, exist_ok=True)
     
-    # Save file
-    # Preserve extension
     _, ext = os.path.splitext(file.filename)
     if not ext:
         ext = ".tif"
-    
-    file_path = os.path.join(session_dir, f"{modality}{ext}")
+        
+    file_path = os.path.join(session_dir, f"{target_slot}_{uuid.uuid4().hex[:6]}{ext}")
     
     try:
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
             
-        # Validate TIFF metadata
+        # Validate TIFF metadata & auto-detect modality
         metadata = validate_tiff(file_path)
         
-        # Save to session state
-        SESSIONS[session_id][modality] = metadata
-        SESSIONS[session_id][f"active_{modality}_path"] = file_path
+        # Save to session
+        SESSIONS[session_id][target_slot] = metadata
+        SESSIONS[session_id][f"active_{target_slot}_path"] = file_path
         
-        # Return serializable metadata
+        # Also maintain legacy keys for backward compatibility
+        if metadata.get("modality") == "SAR":
+            SESSIONS[session_id]["sar_post"] = metadata
+            SESSIONS[session_id]["active_sar_post_path"] = file_path
+        elif target_slot == "image_2" or "pre" in file.filename.lower():
+            SESSIONS[session_id]["optical_pre"] = metadata
+            SESSIONS[session_id]["active_optical_pre_path"] = file_path
+        else:
+            SESSIONS[session_id]["optical_post"] = metadata
+            SESSIONS[session_id]["active_optical_post_path"] = file_path
+            
+        # Update input configuration
+        config_info = classify_input_configuration(
+            SESSIONS[session_id].get("image_1"), 
+            SESSIONS[session_id].get("image_2")
+        )
+        SESSIONS[session_id]["configuration"] = config_info["configuration"]
+        SESSIONS[session_id]["detected_modalities"] = config_info["modalities"]
+        SESSIONS[session_id]["spatial_alignment"] = config_info["spatially_aligned"]
+        
         return JSONResponse(status_code=200, content={
-            "message": f"Successfully uploaded and validated {modality}.",
-            "metadata": metadata
+            "message": f"Successfully uploaded and validated {target_slot}.",
+            "slot": target_slot,
+            "metadata": metadata,
+            "configuration": config_info
         })
         
     except Exception as e:
-        # Cleanup file on failure
         if os.path.exists(file_path):
             os.remove(file_path)
         raise HTTPException(status_code=400, detail=f"Image upload validation failed: {str(e)}")
@@ -142,26 +169,23 @@ async def query_satquery(request: QueryRequest):
     """
     session_id = request.session_id
     if session_id not in SESSIONS:
-        # Initialize empty session
         get_session(session_id)
         
     session = SESSIONS[session_id]
     
     try:
-        # Run orchestrator
         result = orchestrator.execute_workflow(request.query, session)
         
-        # Store analysis history
         session["analyses"].append({
             "query": request.query,
             "answer": result["answer"],
             "task": result["task_classified"],
             "confidence": result["confidence"],
+            "input_configuration": result.get("input_configuration"),
             "stats": result.get("spatial_statistics"),
             "limitations": result["evidence_fusion"]["limitations"]
         })
         
-        # Return response
         return QueryResponse(**result)
         
     except Exception as e:
@@ -178,27 +202,27 @@ def download_report(session_id: str):
     session = SESSIONS[session_id]
     last_analysis = session["analyses"][-1]
     
-    # Generate Markdown content
     report_lines = [
-        "# SATQUERY AI - FLOOD INVESTIGATION REPORT",
+        "# SATQUERY AI - MULTIMODAL REMOTE SENSING INVESTIGATION REPORT",
         f"**Session ID:** {session_id}",
-        f"**Report Generated:** 2026-08-27 (SatQuery System Local Time)",
+        f"**ISRO Problem Statement:** 26167",
+        f"**Input Configuration:** {last_analysis.get('input_configuration', 'SINGLE_IMAGE')}",
         "---",
         "## 1. Imagery Inputs Used",
     ]
     
-    for mod in ["optical_pre", "optical_post", "sar_post"]:
-        meta = session.get(mod)
+    for slot_name in ["image_1", "image_2"]:
+        meta = session.get(slot_name)
         if meta:
-            report_lines.append(f"### Modality: {mod.upper().replace('_', ' ')}")
+            report_lines.append(f"### Input: {slot_name.upper()} ({meta.get('modality', 'UNKNOWN')})")
             report_lines.append(f"- **Filename:** {meta['filename']}")
             report_lines.append(f"- **Dimensions:** {meta['width']} x {meta['height']} ({meta['bands']} bands)")
             report_lines.append(f"- **CRS:** {meta['crs']}")
             if meta.get("latlon_bounds") and meta["latlon_bounds"].get("center"):
                 c = meta["latlon_bounds"]["center"]
-                report_lines.append(f"- **Footprint Center (Lat/Lon):** {c[0]:.5f}, {c[1]:.5f}")
+                report_lines.append(f"- **Center (Lat/Lon):** {c[0]:.5f}°N, {c[1]:.5f}°E")
         else:
-            report_lines.append(f"### Modality: {mod.upper().replace('_', ' ')}\n- *Not provided*")
+            report_lines.append(f"### Input: {slot_name.upper()}\n- *Not provided (Optional for single-image analysis)*")
             
     report_lines.extend([
         "---",
@@ -229,7 +253,7 @@ def download_report(session_id: str):
             for cat, data in stats["landcover_intersection"].items():
                 report_lines.append(f"  - **{cat}:** {data['area_affected_km2']:.3f} km² ({data['pixels_affected']} pixels)")
     else:
-        report_lines.append("*No numerical geospatial statistics were calculated for this task query.*")
+        report_lines.append("*No numerical geospatial statistics were calculated for this query.*")
         
     report_lines.extend([
         "---",
@@ -248,13 +272,11 @@ def download_report(session_id: str):
         "This analysis was processed in an auditable workflow by these components:",
     ])
     
-    # Add registry models details
     for model in registry.list_models():
         report_lines.append(f"- **{model['name']}** (v{model['version']}) - {model['description']}")
         
     report_content = "\n".join(report_lines)
     
-    # Save report to session folder
     session_dir = os.path.join(DATA_DIR, session_id)
     report_path = os.path.join(session_dir, "investigation_report.md")
     

@@ -14,15 +14,19 @@ class ImageMetadata(BaseModel):
     latlon_bounds: Optional[Dict[str, Any]] = None
     pixel_size_x: float
     pixel_size_y: float
+    modality: str = "UNKNOWN" # "OPTICAL", "SAR", "MULTISPECTRAL", "UNKNOWN"
+    band_descriptions: Optional[List[str]] = None
+    acquisition_date: Optional[str] = None
 
 class SessionState(BaseModel):
     session_id: str
-    optical_pre: Optional[ImageMetadata] = None
-    optical_post: Optional[ImageMetadata] = None
-    sar_post: Optional[ImageMetadata] = None
-    active_optical_pre_path: Optional[str] = None
-    active_optical_post_path: Optional[str] = None
-    active_sar_post_path: Optional[str] = None
+    image_1: Optional[ImageMetadata] = None
+    image_2: Optional[ImageMetadata] = None
+    active_image_1_path: Optional[str] = None
+    active_image_2_path: Optional[str] = None
+    configuration: str = "EMPTY" # "EMPTY", "SINGLE_IMAGE", "OPTICAL_SAR_PAIR", "BI_TEMPORAL_PAIR", "INVALID_PAIR", "INCOMPATIBLE_INPUT"
+    detected_modalities: List[str] = []
+    spatial_alignment: bool = False
 
 class QueryRequest(BaseModel):
     query: str
@@ -46,6 +50,7 @@ class QueryResponse(BaseModel):
     answer: str
     confidence: str # e.g. "High", "Moderate", "Low", "Insufficient evidence"
     task_classified: str
+    input_configuration: Optional[str] = None # "SINGLE_IMAGE", "OPTICAL_SAR_PAIR", "BI_TEMPORAL_PAIR", etc.
     evidence_fusion: EvidenceFusion
     spatial_statistics: Optional[Dict[str, Any]] = None
     execution_trace: List[ExecutionStep]

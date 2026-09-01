@@ -1,12 +1,64 @@
 import os
 import rasterio
-from rasterio.warp import transform_bounds
+from rasterio.warp import transform_bounds, transform as warp_transform
 import numpy as np
+import re
+
+def detect_modality(src, filepath: str) -> str:
+    """
+    Infers the sensor modality of a raster from band counts, descriptions, tags, and filename.
+    Returns: 'OPTICAL', 'SAR', 'MULTISPECTRAL', or 'UNKNOWN'.
+    """
+    fn = os.path.basename(filepath).lower()
+    descriptions = [str(d).lower() if d else "" for d in (src.descriptions or [])]
+    tags = {str(k).lower(): str(v).lower() for k, v in src.tags().items()}
+    tag_blob = " ".join(tags.values()) + " " + " ".join(descriptions) + " " + fn
+
+    # 1. Check for SAR keywords
+    sar_keywords = ["sar", "sentinel-1", "s1", "risat", "radar", "backscatter", "sigma0", "gamma0", "vv", "vh", "hh", "hv"]
+    if any(k in tag_blob for k in sar_keywords):
+        return "SAR"
+        
+    # 2. Check band count
+    if src.count == 1:
+        # Check if dtype is float or single-channel radar intensity
+        return "SAR" if any(k in fn for k in ["sar", "radar", "s1", "vh", "vv"]) else "OPTICAL"
+    elif src.count == 3:
+        return "OPTICAL"
+    elif src.count >= 4:
+        return "MULTISPECTRAL"
+        
+    return "UNKNOWN"
+
+def extract_acquisition_date(src, filepath: str) -> str:
+    """
+    Extracts acquisition timestamp or date from raster metadata or filename if available.
+    """
+    fn = os.path.basename(filepath).lower()
+    
+    # Check tags
+    tags = {str(k).lower(): str(v) for k, v in src.tags().items()}
+    for key in ["datetime", "date", "acquisition_date", "time_coverage_start"]:
+        if key in tags:
+            return tags[key]
+            
+    # Check filename for YYYYMMDD pattern
+    match = re.search(r'(20\d{2}[01]\d[0-3]\d)', fn)
+    if match:
+        d = match.group(1)
+        return f"{d[:4]}-{d[4:6]}-{d[6:]}"
+        
+    if "pre" in fn or "before" in fn:
+        return "Pre-Event"
+    elif "post" in fn or "after" in fn:
+        return "Post-Event"
+        
+    return "Unknown Date"
 
 def validate_tiff(filepath: str) -> dict:
     """
-    Opens and validates a TIFF/GeoTIFF file, extracting key spatial metadata.
-    Converts spatial bounds to WGS84 (latitude/longitude) for mapping compatibility.
+    Opens and validates a TIFF/GeoTIFF file, extracting key spatial metadata,
+    sensor modality, and coordinate transformations.
     """
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"File not found: {filepath}")
@@ -34,7 +86,6 @@ def validate_tiff(filepath: str) -> dict:
             latlon_bounds = None
             if crs is not None:
                 try:
-                    # Transform bounds to EPSG:4326
                     min_lon, min_lat, max_lon, max_lat = transform_bounds(crs, 'EPSG:4326', min_x, min_y, max_x, max_y)
                     latlon_bounds = {
                         "min_lat": min_lat,
@@ -44,14 +95,17 @@ def validate_tiff(filepath: str) -> dict:
                         "center": [(min_lat + max_lat) / 2, (min_lon + max_lon) / 2]
                     }
                 except Exception as e:
-                    # Fallback if transformation fails
                     latlon_bounds = {
                         "min_lat": None, "min_lon": None, "max_lat": None, "max_lon": None,
                         "center": None,
                         "warning": f"Could not transform CRS {crs} to EPSG:4326: {str(e)}"
                     }
             
-            # Formulate structured metadata
+            # Detect modality & band semantics
+            modality = detect_modality(src, filepath)
+            acquisition_date = extract_acquisition_date(src, filepath)
+            band_descriptions = [str(d) if d else f"Band {i+1}" for i, d in enumerate(src.descriptions or [])]
+            
             crs_str = str(crs) if crs else "Unknown/None"
             is_geotiff = crs is not None and bool(crs.to_string())
             
@@ -73,7 +127,10 @@ def validate_tiff(filepath: str) -> dict:
                 },
                 "latlon_bounds": latlon_bounds,
                 "pixel_size_x": transform.a,
-                "pixel_size_y": abs(transform.e) # typical resolution
+                "pixel_size_y": abs(transform.e),
+                "modality": modality,
+                "acquisition_date": acquisition_date,
+                "band_descriptions": band_descriptions
             }
             
     except Exception as e:
@@ -87,6 +144,9 @@ def are_compatible(meta1: dict, meta2: dict, threshold_pct: float = 0.05) -> dic
     reasons = []
     compatible = True
     
+    if not meta1 or not meta2:
+        return {"compatible": False, "reasons": ["Missing metadata for one or both images."], "limitations": ["Missing metadata"]}
+    
     # 1. Check CRS
     if meta1.get("crs") != meta2.get("crs"):
         compatible = False
@@ -94,14 +154,12 @@ def are_compatible(meta1: dict, meta2: dict, threshold_pct: float = 0.05) -> dic
         
     # 2. Check Dimensions
     if meta1.get("width") != meta2.get("width") or meta1.get("height") != meta2.get("height"):
-        # We allow slight mismatch if they cover the same area (needs resampling)
         reasons.append(f"Dimension mismatch: {meta1.get('width')}x{meta1.get('height')} vs {meta2.get('width')}x{meta2.get('height')}")
         
     # 3. Check Overlap
     b1 = meta1.get("bounds", {})
     b2 = meta2.get("bounds", {})
     
-    # Calculate intersection of bounds
     x_left = max(b1.get("left", 0), b2.get("left", 0))
     y_bottom = max(b1.get("bottom", 0), b2.get("bottom", 0))
     x_right = min(b1.get("right", 0), b2.get("right", 0))
@@ -111,10 +169,9 @@ def are_compatible(meta1: dict, meta2: dict, threshold_pct: float = 0.05) -> dic
         compatible = False
         reasons.append("No geographic overlap between images.")
     else:
-        # Check how much they overlap relative to the first image area
         area1 = (b1["right"] - b1["left"]) * (b1["top"] - b1["bottom"])
         overlap_area = (x_right - x_left) * (y_top - y_bottom)
-        overlap_pct = overlap_area / area1
+        overlap_pct = overlap_area / (area1 if area1 != 0 else 1.0)
         if overlap_pct < 0.9:
             reasons.append(f"Geographic overlap is only {overlap_pct:.1%}. Recommend >90% for reliable comparison.")
             if overlap_pct < 0.5:
@@ -127,6 +184,76 @@ def are_compatible(meta1: dict, meta2: dict, threshold_pct: float = 0.05) -> dic
         "limitations": reasons if not compatible or len(reasons) > 0 else []
     }
 
+def classify_input_configuration(meta1: dict, meta2: dict = None) -> dict:
+    """
+    Classifies the active workspace into:
+    - 'SINGLE_IMAGE'
+    - 'OPTICAL_SAR_PAIR'
+    - 'BI_TEMPORAL_PAIR'
+    - 'INCOMPATIBLE_INPUT'
+    - 'EMPTY'
+    """
+    if not meta1 and not meta2:
+        return {
+            "configuration": "EMPTY",
+            "modalities": [],
+            "spatially_aligned": False,
+            "details": "No satellite images loaded."
+        }
+        
+    if meta1 and not meta2:
+        mod = meta1.get("modality", "UNKNOWN")
+        return {
+            "configuration": "SINGLE_IMAGE",
+            "modalities": [mod],
+            "spatially_aligned": True,
+            "details": f"Single {mod} image ready for analysis."
+        }
+        
+    if meta2 and not meta1:
+        mod = meta2.get("modality", "UNKNOWN")
+        return {
+            "configuration": "SINGLE_IMAGE",
+            "modalities": [mod],
+            "spatially_aligned": True,
+            "details": f"Single {mod} image ready for analysis."
+        }
+        
+    # Both meta1 and meta2 are present
+    comp = are_compatible(meta1, meta2)
+    if not comp["compatible"]:
+        return {
+            "configuration": "INCOMPATIBLE_INPUT",
+            "modalities": [meta1.get("modality", "UNKNOWN"), meta2.get("modality", "UNKNOWN")],
+            "spatially_aligned": False,
+            "details": "Spatial incompatibility: " + "; ".join(comp["reasons"])
+        }
+        
+    mod1 = meta1.get("modality", "UNKNOWN")
+    mod2 = meta2.get("modality", "UNKNOWN")
+    
+    # Check for Optical + SAR
+    is_opt1 = mod1 in ["OPTICAL", "MULTISPECTRAL"]
+    is_sar1 = mod1 == "SAR"
+    is_opt2 = mod2 in ["OPTICAL", "MULTISPECTRAL"]
+    is_sar2 = mod2 == "SAR"
+    
+    if (is_opt1 and is_sar2) or (is_sar1 and is_opt2):
+        return {
+            "configuration": "OPTICAL_SAR_PAIR",
+            "modalities": [mod1, mod2],
+            "spatially_aligned": True,
+            "details": "Spatially co-registered Optical + SAR cross-modal pair."
+        }
+        
+    # Both Optical or Both SAR -> Bi-Temporal
+    return {
+        "configuration": "BI_TEMPORAL_PAIR",
+        "modalities": [mod1, mod2],
+        "spatially_aligned": True,
+        "details": f"Spatially aligned multi-temporal {mod1} pair."
+    }
+
 def get_pixel_coords(meta: dict, lon: float, lat: float) -> tuple:
     """
     Converts WGS84 GPS coordinate (lon, lat) to pixel coordinates (x, y).
@@ -137,31 +264,18 @@ def get_pixel_coords(meta: dict, lon: float, lat: float) -> tuple:
         if crs_str == "Unknown/None":
             return None
         
-        # Setup projection transformer from WGS84 (4326) to image CRS
         transformer = Transformer.from_crs("EPSG:4326", crs_str, always_xy=True)
         x_proj, y_proj = transformer.transform(lon, lat)
         
-        # Apply inverse affine transform to get pixel coordinates
-        # transform parameters: a, b, c, d, e, f -> Affine(a, b, c, d, e, f)
         a, b, c, d, e, f = meta.get("transform")
-        
-        # Solve system:
-        # x_proj = a*px + b*py + c
-        # y_proj = d*px + e*py + f
-        # Assuming b = d = 0 for standard non-rotated imagery
         if b == 0 and d == 0:
             px = int(round((x_proj - c) / a))
             py = int(round((y_proj - f) / e))
         else:
-            # Full linear system solver
-            # Affine formula: X = M * P
-            # [x_proj - c]   [a  b]   [px]
-            # [y_proj - f] = [d  e] * [py]
             det = a * e - b * d
             px = int(round((e * (x_proj - c) - b * (y_proj - f)) / det))
             py = int(round((-d * (x_proj - c) + a * (y_proj - f)) / det))
             
-        # Check if coordinates fall inside image dimensions
         if 0 <= px < meta["width"] and 0 <= py < meta["height"]:
             return px, py
         return None
@@ -174,7 +288,6 @@ def project_point(from_crs: str, to_crs: str, x: float, y: float) -> tuple:
     Returns (x_proj, y_proj).
     """
     try:
-        from rasterio.warp import transform as warp_transform
         xs, ys = warp_transform(from_crs, to_crs, [x], [y])
         return xs[0], ys[0]
     except Exception as e:

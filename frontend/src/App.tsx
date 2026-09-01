@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   Layers, Upload, ShieldAlert, Cpu, 
   Download, RefreshCw, Compass, 
-  AlertTriangle, ChevronRight, Info
+  AlertTriangle, ChevronRight, Info, CheckCircle2
 } from 'lucide-react';
 import { MapContainer, TileLayer, ImageOverlay, useMap } from 'react-leaflet';
 import L from 'leaflet';
@@ -29,6 +29,9 @@ interface ImageMetadata {
   latlon_bounds: { min_lat: number; min_lon: number; max_lat: number; max_lon: number; center: [number, number] };
   pixel_size_x: number;
   pixel_size_y: number;
+  modality: string; // "OPTICAL", "SAR", "MULTISPECTRAL", "UNKNOWN"
+  acquisition_date?: string;
+  band_descriptions?: string[];
 }
 
 interface Message {
@@ -57,6 +60,7 @@ interface AnalysisResult {
   answer: string;
   confidence: string;
   task_classified: string;
+  input_configuration?: string;
   evidence_fusion: EvidenceFusion;
   spatial_statistics?: any;
   execution_trace: ExecutionStep[];
@@ -75,20 +79,21 @@ function MapRecenter({ center }: { center: [number, number] | null }) {
 }
 
 export default function App() {
-  // Session ID state
   const [sessionId] = useState(() => `session_${uuidv4()}`);
   
-  // Image metadata states
-  const [opticalPre, setOpticalPre] = useState<ImageMetadata | null>(null);
-  const [opticalPost, setOpticalPost] = useState<ImageMetadata | null>(null);
-  const [sarPost, setSarPost] = useState<ImageMetadata | null>(null);
+  // Flexible Image Inputs
+  const [image1, setImage1] = useState<ImageMetadata | null>(null);
+  const [image2, setImage2] = useState<ImageMetadata | null>(null);
+  const [inputConfig, setInputConfig] = useState<string>("EMPTY");
+  const [detectedModalities, setDetectedModalities] = useState<string[]>([]);
+  const [spatialAligned, setSpatialAligned] = useState<boolean>(false);
   
   // App UI states
   const [query, setQuery] = useState('');
   const [messages, setMessages] = useState<Message[]>([
     {
       sender: 'system',
-      text: "Welcome to SatQuery AI Geospatial Workstation. Upload satellite images (GeoTIFF/TIFF) or load the pre-configured Indian flood demo data. Ask natural-language questions to analyze water expansion, flood impact on land covers, and verify cross-modal evidence.",
+      text: "🛰️ Welcome to SatQuery AI (ISRO PS 26167). Upload a single satellite image (Optical or SAR) to begin VQA and grounding, or add a second observation for cross-modal fusion or temporal change detection.",
       timestamp: new Date().toLocaleTimeString()
     }
   ]);
@@ -96,16 +101,16 @@ export default function App() {
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
   
   // Map display settings
-  const [selectedLayer, setSelectedLayer] = useState<string>('satellite'); // satellite, pre_optical, post_optical, flood_mask, change_mask, lulc_map
+  const [selectedLayer, setSelectedLayer] = useState<string>('satellite');
   const [opacity, setOpacity] = useState<number>(75);
-  const [mapCenter, setMapCenter] = useState<[number, number] | null>([26.24, 93.02]); // Centered near Assam, India
+  const [mapCenter, setMapCenter] = useState<[number, number] | null>([26.24, 93.02]); // Assam, India
   const [activeOverlayUrl, setActiveOverlayUrl] = useState<string | null>(null);
   const [overlayBounds, setOverlayBounds] = useState<[[number, number], [number, number]] | null>(null);
   const [modelRegistry, setModelRegistry] = useState<any[]>([]);
   const [showRegistry, setShowRegistry] = useState(false);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [uploadingModality, setUploadingModality] = useState<string | null>(null);
+  const [uploadingSlot, setUploadingSlot] = useState<string | null>(null);
 
   // Fetch model registry on mount
   useEffect(() => {
@@ -115,26 +120,36 @@ export default function App() {
       .catch(err => console.error("Error fetching models:", err));
   }, []);
 
+  // Update session configuration state
+  const refreshSessionConfig = async () => {
+    try {
+      const res = await fetch(`/api/session/${sessionId}`);
+      const data = await res.json();
+      setInputConfig(data.configuration || "EMPTY");
+      setDetectedModalities(data.detected_modalities || []);
+      setSpatialAligned(data.spatial_alignment || false);
+      if (data.image_1) setImage1(data.image_1);
+      if (data.image_2) setImage2(data.image_2);
+    } catch (e) {
+      console.error("Failed to sync session config", e);
+    }
+  };
+
   // Recenter map when metadata changes
   useEffect(() => {
-    if (opticalPost?.latlon_bounds?.center) {
-      setMapCenter(opticalPost.latlon_bounds.center);
+    const activeMeta = image1 || image2;
+    if (activeMeta?.latlon_bounds?.center) {
+      setMapCenter(activeMeta.latlon_bounds.center);
       setOverlayBounds([
-        [opticalPost.latlon_bounds.min_lat, opticalPost.latlon_bounds.min_lon],
-        [opticalPost.latlon_bounds.max_lat, opticalPost.latlon_bounds.max_lon]
-      ]);
-    } else if (opticalPre?.latlon_bounds?.center) {
-      setMapCenter(opticalPre.latlon_bounds.center);
-      setOverlayBounds([
-        [opticalPre.latlon_bounds.min_lat, opticalPre.latlon_bounds.min_lon],
-        [opticalPre.latlon_bounds.max_lat, opticalPre.latlon_bounds.max_lon]
+        [activeMeta.latlon_bounds.min_lat, activeMeta.latlon_bounds.min_lon],
+        [activeMeta.latlon_bounds.max_lat, activeMeta.latlon_bounds.max_lon]
       ]);
     }
-  }, [opticalPre, opticalPost]);
+  }, [image1, image2]);
 
   // Canvas Grid Renderer to Base64 Overlay
   useEffect(() => {
-    if (!analysis || !analysis.visual_evidence || !opticalPost) return;
+    if (!analysis || !analysis.visual_evidence) return;
     
     const canvas = document.createElement('canvas');
     canvas.width = 256;
@@ -144,111 +159,81 @@ export default function App() {
     
     const imgData = ctx.createImageData(256, 256);
     
-    // Render layers
+    // 1. Optical Flood Mask (Blue)
     if (selectedLayer === 'flood_mask' && analysis.visual_evidence.optical_water_mask) {
       const mask = analysis.visual_evidence.optical_water_mask;
       for (let i = 0; i < 256; i++) {
         for (let j = 0; j < 256; j++) {
           const idx = (i * 256 + j) * 4;
           if (mask[i][j] === 1) {
-            // Blue for water
-            imgData.data[idx] = 0;     // R
-            imgData.data[idx+1] = 120; // G
-            imgData.data[idx+2] = 255; // B
-            imgData.data[idx+3] = 220; // A
-          } else {
-            // Transparent
-            imgData.data[idx+3] = 0;
+            imgData.data[idx] = 0;
+            imgData.data[idx+1] = 130;
+            imgData.data[idx+2] = 255;
+            imgData.data[idx+3] = 220;
           }
         }
       }
       ctx.putImageData(imgData, 0, 0);
       setActiveOverlayUrl(canvas.toDataURL());
     } 
+    // 2. SAR Water Mask (Cyan)
     else if (selectedLayer === 'sar_water_mask' && analysis.visual_evidence.sar_water_mask) {
       const mask = analysis.visual_evidence.sar_water_mask;
       for (let i = 0; i < 256; i++) {
         for (let j = 0; j < 256; j++) {
           const idx = (i * 256 + j) * 4;
           if (mask[i][j] === 1) {
-            // Cyan for SAR water
-            imgData.data[idx] = 0;     // R
-            imgData.data[idx+1] = 220; // G
-            imgData.data[idx+2] = 220; // B
-            imgData.data[idx+3] = 220; // A
-          } else {
-            imgData.data[idx+3] = 0;
+            imgData.data[idx] = 0;
+            imgData.data[idx+1] = 230;
+            imgData.data[idx+2] = 230;
+            imgData.data[idx+3] = 220;
           }
         }
       }
       ctx.putImageData(imgData, 0, 0);
       setActiveOverlayUrl(canvas.toDataURL());
     }
+    // 3. Bi-temporal Change Map (Red for new water, Blue for stable)
     else if (selectedLayer === 'change_mask' && analysis.visual_evidence.flooded_mask) {
-      const flooded = analysis.visual_evidence.flooded_mask;
-      const receded = analysis.visual_evidence.receded_mask;
-      
+      const flood = analysis.visual_evidence.flooded_mask;
       for (let i = 0; i < 256; i++) {
         for (let j = 0; j < 256; j++) {
           const idx = (i * 256 + j) * 4;
-          if (flooded && flooded[i][j] === 1) {
-            // Red for new flood expansion
-            imgData.data[idx] = 248;   // R
-            imgData.data[idx+1] = 81;  // G
-            imgData.data[idx+2] = 73;  // B
-            imgData.data[idx+3] = 230; // A
-          } else if (receded && receded[i][j] === 1) {
-            // Green for receded water
-            imgData.data[idx] = 46;    // R
-            imgData.data[idx+1] = 164; // G
-            imgData.data[idx+2] = 79;  // B
-            imgData.data[idx+3] = 230; // A
-          } else {
-            imgData.data[idx+3] = 0;
+          if (flood[i][j] === 1) {
+            imgData.data[idx] = 255;
+            imgData.data[idx+1] = 50;
+            imgData.data[idx+2] = 50;
+            imgData.data[idx+3] = 230;
           }
         }
       }
       ctx.putImageData(imgData, 0, 0);
       setActiveOverlayUrl(canvas.toDataURL());
     }
+    // 4. Adapted LULC Map
     else if (selectedLayer === 'lulc_map' && analysis.visual_evidence.lulc_grid) {
       const lulc = analysis.visual_evidence.lulc_grid;
-      // EuroSAT class colors:
-      // Agri (0, 5, 6): Greenish yellow
-      // Forest (1, 2): Dark Green
-      // Urban (3, 4, 7): Orange/Red
-      // Water (8, 9): Dark Blue
+      const colors: Record<number, [number, number, number]> = {
+        0: [240, 220, 100], // Crops (Yellow)
+        1: [34, 139, 34],   // Forest (Dark green)
+        2: [124, 252, 0],   // Vegetation (Light green)
+        3: [128, 128, 128], // Highway (Grey)
+        4: [169, 169, 169], // Industrial
+        5: [144, 238, 144], // Pasture
+        6: [218, 165, 32],  // Perm Crop
+        7: [220, 20, 60],   // Residential (Red-Pink)
+        8: [30, 144, 255],  // River (Blue)
+        9: [0, 0, 139]      // Sea
+      };
       for (let i = 0; i < 256; i++) {
         for (let j = 0; j < 256; j++) {
           const idx = (i * 256 + j) * 4;
-          const val = lulc[i][j];
-          
-          if ([0, 5, 6].includes(val)) { // Agriculture
-            imgData.data[idx] = 180;   // R
-            imgData.data[idx+1] = 210; // G
-            imgData.data[idx+2] = 100; // B
-            imgData.data[idx+3] = 180; // A
-          } else if ([1, 2].includes(val)) { // Forest/Veg
-            imgData.data[idx] = 34;    // R
-            imgData.data[idx+1] = 139; // G
-            imgData.data[idx+2] = 34;  // B
-            imgData.data[idx+3] = 180; // A
-          } else if ([3, 4, 7].includes(val)) { // Urban
-            imgData.data[idx] = 218;   // R
-            imgData.data[idx+1] = 118; // G
-            imgData.data[idx+2] = 11;  // B
-            imgData.data[idx+3] = 180; // A
-          } else if ([8, 9].includes(val)) { // Water
-            imgData.data[idx] = 12;    // R
-            imgData.data[idx+1] = 45;  // G
-            imgData.data[idx+2] = 90;  // B
-            imgData.data[idx+3] = 180; // A
-          } else {
-            imgData.data[idx] = 100;   // Gray
-            imgData.data[idx+1] = 100;
-            imgData.data[idx+2] = 100;
-            imgData.data[idx+3] = 120;
-          }
+          const cls = lulc[i][j];
+          const rgb = colors[cls] || [200, 200, 200];
+          imgData.data[idx] = rgb[0];
+          imgData.data[idx+1] = rgb[1];
+          imgData.data[idx+2] = rgb[2];
+          imgData.data[idx+3] = 160;
         }
       }
       ctx.putImageData(imgData, 0, 0);
@@ -256,28 +241,26 @@ export default function App() {
     } else {
       setActiveOverlayUrl(null);
     }
-  }, [selectedLayer, analysis, opticalPost]);
+  }, [selectedLayer, analysis]);
 
-  // Load preset demo files (optical_pre, optical_post, sar_post)
-  const handleLoadDemo = async () => {
+  // Load preset demo files
+  const handleLoadDemo = async (presetType: 'cross_modal' | 'temporal' | 'single_optical' | 'single_sar') => {
     setLoading(true);
     setMessages(prev => [...prev, {
       sender: 'system',
-      text: "🔄 Contacting backend to ingest Indian flood demo GeoTIFFs (Assam Valley, UTM Zone 45N)...",
+      text: `🔄 Ingesting ${presetType.replace('_', ' ').toUpperCase()} demo observation(s)...`,
       timestamp: new Date().toLocaleTimeString()
     }]);
     
     try {
-      // Direct file loads from local backend folders
-      const loadDemoFile = async (filename: string, modality: string) => {
-        // Fetch files generated on local system and post them
+      const loadDemoFile = async (filename: string, slot: string) => {
         const response = await fetch(`/api/demo/${filename}`);
         const blob = await response.blob();
         const file = new File([blob], filename, { type: "image/tiff" });
         
         const formData = new FormData();
         formData.append("file", file);
-        formData.append("modality", modality);
+        formData.append("slot", slot);
         formData.append("session_id", sessionId);
         
         const uploadRes = await fetch("/api/upload", {
@@ -287,25 +270,38 @@ export default function App() {
         return uploadRes.json();
       };
       
-      const resPre = await loadDemoFile("optical_pre.tif", "optical_pre");
-      setOpticalPre(resPre.metadata);
+      if (presetType === 'single_optical') {
+        const r1 = await loadDemoFile("optical_post.tif", "image_1");
+        setImage1(r1.metadata);
+        setImage2(null);
+      } else if (presetType === 'single_sar') {
+        const r1 = await loadDemoFile("sar_post.tif", "image_1");
+        setImage1(r1.metadata);
+        setImage2(null);
+      } else if (presetType === 'cross_modal') {
+        const r1 = await loadDemoFile("optical_post.tif", "image_1");
+        const r2 = await loadDemoFile("sar_post.tif", "image_2");
+        setImage1(r1.metadata);
+        setImage2(r2.metadata);
+      } else if (presetType === 'temporal') {
+        const r1 = await loadDemoFile("optical_pre.tif", "image_1");
+        const r2 = await loadDemoFile("optical_post.tif", "image_2");
+        setImage1(r1.metadata);
+        setImage2(r2.metadata);
+      }
       
-      const resPost = await loadDemoFile("optical_post.tif", "optical_post");
-      setOpticalPost(resPost.metadata);
-      
-      const resSar = await loadDemoFile("sar_post.tif", "sar_post");
-      setSarPost(resSar.metadata);
+      await refreshSessionConfig();
       
       setMessages(prev => [...prev, {
         sender: 'system',
-        text: "✅ Loaded Indian Flood demo files: pre-event optical, post-event optical (with cloud cover), and post-event SAR. Telemetry checks validated CRS and geotransforms match. You can now execute flood change queries.",
+        text: `✅ Loaded ${presetType.replace('_', ' ').toUpperCase()} scenario data. Ready for investigation.`,
         timestamp: new Date().toLocaleTimeString()
       }]);
     } catch (err: any) {
       console.error(err);
       setMessages(prev => [...prev, {
         sender: 'system',
-        text: `❌ Error loading demo files: ${err.message}. Please check if backend is running.`,
+        text: `❌ Error loading demo data: ${err.message}`,
         timestamp: new Date().toLocaleTimeString()
       }]);
     } finally {
@@ -314,25 +310,25 @@ export default function App() {
   };
 
   // Upload handler
-  const triggerUpload = (modality: string) => {
-    setUploadingModality(modality);
+  const triggerUpload = (slot: string) => {
+    setUploadingSlot(slot);
     fileInputRef.current?.click();
   };
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file || !uploadingModality) return;
+    if (!file || !uploadingSlot) return;
     
     setLoading(true);
     setMessages(prev => [...prev, {
       sender: 'system',
-      text: `Uploading and extracting metadata for ${file.name}...`,
+      text: `Uploading and detecting modality for ${file.name}...`,
       timestamp: new Date().toLocaleTimeString()
     }]);
     
     const formData = new FormData();
     formData.append("file", file);
-    formData.append("modality", uploadingModality);
+    formData.append("slot", uploadingSlot);
     formData.append("session_id", sessionId);
     
     try {
@@ -344,25 +340,26 @@ export default function App() {
       
       if (!res.ok) throw new Error(data.detail || "Upload failed");
       
-      if (uploadingModality === 'optical_pre') setOpticalPre(data.metadata);
-      if (uploadingModality === 'optical_post') setOpticalPost(data.metadata);
-      if (uploadingModality === 'sar_post') setSarPost(data.metadata);
+      if (uploadingSlot === 'image_1') setImage1(data.metadata);
+      if (uploadingSlot === 'image_2') setImage2(data.metadata);
+      
+      await refreshSessionConfig();
       
       setMessages(prev => [...prev, {
         sender: 'system',
-        text: `✅ Uploaded ${uploadingModality.replace('_', ' ')}: ${data.metadata.filename}. CRS is ${data.metadata.crs}, shape ${data.metadata.width}x{data.metadata.height}.`,
+        text: `✅ Ingested ${uploadingSlot.toUpperCase()}: ${data.metadata.filename} (Detected: ${data.metadata.modality}, ${data.metadata.bands} bands). Configuration: ${data.configuration?.configuration}`,
         timestamp: new Date().toLocaleTimeString()
       }]);
       
     } catch (err: any) {
       setMessages(prev => [...prev, {
         sender: 'system',
-        text: `❌ Error uploading file: ${err.message}`,
+        text: `❌ Upload failed: ${err.message}`,
         timestamp: new Date().toLocaleTimeString()
       }]);
     } finally {
       setLoading(false);
-      setUploadingModality(null);
+      setUploadingSlot(null);
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
@@ -396,28 +393,29 @@ export default function App() {
       
       setAnalysis(data);
       
-      // Add response message
       setMessages(prev => [...prev, {
         sender: 'system',
         text: data.answer,
         timestamp: new Date().toLocaleTimeString()
       }]);
       
-      // Set default map view layer based on task
+      // Auto-switch map layer
       if (data.task_classified === 'CHANGE_ANALYSIS') {
         setSelectedLayer('change_mask');
       } else if (data.task_classified === 'OPTICAL_SAR') {
         setSelectedLayer('sar_water_mask');
       } else if (data.task_classified === 'LAND_COVER_IMPACT') {
         setSelectedLayer('lulc_map');
-      } else {
+      } else if (data.visual_evidence?.optical_water_mask) {
         setSelectedLayer('flood_mask');
+      } else if (data.visual_evidence?.sar_water_mask) {
+        setSelectedLayer('sar_water_mask');
       }
       
     } catch (err: any) {
       setMessages(prev => [...prev, {
         sender: 'system',
-        text: `❌ Query analysis failed: ${err.message}`,
+        text: `❌ Investigation failed: ${err.message}`,
         timestamp: new Date().toLocaleTimeString()
       }]);
     } finally {
@@ -425,13 +423,12 @@ export default function App() {
     }
   };
 
-  // Download Report
   const handleDownloadReport = () => {
     window.open(`/api/report/${sessionId}`, '_blank');
   };
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-[#0d0f12] text-slate-100">
+    <div className="flex h-screen w-screen overflow-hidden bg-[#0d0f12] text-slate-100 font-sans">
       
       {/* Hidden file input */}
       <input 
@@ -442,138 +439,145 @@ export default function App() {
         accept=".tif,.tiff" 
       />
 
-      {/* Main Grid: Left Uploads Panel (1/4) | Map Center (2/4) | Chat/Stats Right (1/4) */}
+      {/* Main Layout: Left Upload/Config Panel | Center Leaflet Map | Right Chat & Telemetry */}
       <div className="flex h-full w-full">
         
         {/* Left Side: Uploads & Telemetry */}
-        <div className="flex w-[320px] flex-col border-r border-[#30363d] bg-[#161b22] p-4 text-sm overflow-y-auto">
-          <div className="mb-4 flex items-center justify-between">
+        <div className="flex w-[330px] flex-col border-r border-[#30363d] bg-[#161b22] p-4 text-sm overflow-y-auto shrink-0">
+          <div className="mb-3 flex items-center justify-between">
             <h1 className="text-base font-bold tracking-tight text-white flex items-center gap-2">
               🛰️ SatQuery AI
             </h1>
-            <span className="rounded bg-brand-darkBlue px-1.5 py-0.5 text-xs text-brand-cyan border border-brand-blue/30">
-              PS 26167
+            <span className="rounded bg-brand-darkBlue px-1.5 py-0.5 text-[10px] font-bold text-brand-cyan border border-brand-blue/30">
+              ISRO PS 26167
             </span>
           </div>
           
           <p className="text-xs text-slate-400 mb-4 leading-relaxed">
-            Multimodal remote-sensing intelligence specialized for flood investigation.
+            Agentic Vision-Language Assistant for Multimodal Remote Sensing.
           </p>
 
-          <button 
-            onClick={handleLoadDemo}
-            disabled={loading}
-            className="mb-6 flex w-full items-center justify-center gap-2 rounded-md bg-brand-blue/20 border border-brand-blue py-2.5 px-4 text-xs font-semibold text-brand-cyan hover:bg-brand-blue/30 transition disabled:opacity-50"
-          >
-            <RefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
-            Load Indian Flood Demo Data
-          </button>
-
-          {/* Upload Cards */}
-          <div className="space-y-4 mb-6">
-            <h2 className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-2">
-              <Layers className="h-3 w-3 text-brand-cyan" /> Imagery Inputs
-            </h2>
-            
-            {/* Optical Pre */}
-            <div className="rounded-md border border-[#30363d] bg-[#0d0f12] p-3">
-              <div className="flex items-center justify-between mb-2">
-                <span className="font-bold text-xs text-slate-300">OPTICAL PRE-EVENT</span>
-                {opticalPre ? (
-                  <span className="text-[10px] text-green-400 bg-green-500/10 px-1 border border-green-500/20 rounded">Active</span>
-                ) : (
-                  <span className="text-[10px] text-slate-500">Empty</span>
-                )}
-              </div>
-              {opticalPre ? (
-                <div className="text-[11px] text-slate-400 space-y-1">
-                  <div className="truncate font-semibold text-slate-300">{opticalPre.filename}</div>
-                  <div>Dim: {opticalPre.width}x{opticalPre.height} ({opticalPre.bands} bands)</div>
-                  <div>CRS: {opticalPre.crs}</div>
-                </div>
-              ) : (
-                <button 
-                  onClick={() => triggerUpload('optical_pre')}
-                  disabled={loading}
-                  className="flex w-full items-center justify-center gap-1 border border-dashed border-slate-700 hover:border-slate-500 rounded py-2 text-xs text-slate-400"
-                >
-                  <Upload className="h-3 w-3" /> Upload Optical Pre
-                </button>
-              )}
+          {/* Quick Scenario Pre-sets */}
+          <div className="mb-5 space-y-1.5">
+            <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-1">
+              <RefreshCw className="h-3 w-3 text-brand-cyan" /> Load Demo Presets
             </div>
-
-            {/* Optical Post */}
-            <div className="rounded-md border border-[#30363d] bg-[#0d0f12] p-3">
-              <div className="flex items-center justify-between mb-2">
-                <span className="font-bold text-xs text-slate-300">OPTICAL POST-EVENT</span>
-                {opticalPost ? (
-                  <span className="text-[10px] text-green-400 bg-green-500/10 px-1 border border-green-500/20 rounded">Active</span>
-                ) : (
-                  <span className="text-[10px] text-slate-500">Empty</span>
-                )}
-              </div>
-              {opticalPost ? (
-                <div className="text-[11px] text-slate-400 space-y-1">
-                  <div className="truncate font-semibold text-slate-300">{opticalPost.filename}</div>
-                  <div>Dim: {opticalPost.width}x{opticalPost.height} ({opticalPost.bands} bands)</div>
-                  <div>CRS: {opticalPost.crs}</div>
-                  <div className="text-brand-orange flex items-center gap-1 text-[10px] mt-1 bg-brand-orange/10 p-1 rounded border border-brand-orange/20">
-                    <AlertTriangle className="h-3 w-3 shrink-0" /> Clouds in top-right
-                  </div>
-                </div>
-              ) : (
-                <button 
-                  onClick={() => triggerUpload('optical_post')}
-                  disabled={loading}
-                  className="flex w-full items-center justify-center gap-1 border border-dashed border-slate-700 hover:border-slate-500 rounded py-2 text-xs text-slate-400"
-                >
-                  <Upload className="h-3 w-3" /> Upload Optical Post
-                </button>
-              )}
-            </div>
-
-            {/* SAR Post */}
-            <div className="rounded-md border border-[#30363d] bg-[#0d0f12] p-3">
-              <div className="flex items-center justify-between mb-2">
-                <span className="font-bold text-xs text-slate-300">SAR POST-EVENT</span>
-                {sarPost ? (
-                  <span className="text-[10px] text-green-400 bg-green-500/10 px-1 border border-green-500/20 rounded">Active</span>
-                ) : (
-                  <span className="text-[10px] text-slate-500">Empty</span>
-                )}
-              </div>
-              {sarPost ? (
-                <div className="text-[11px] text-slate-400 space-y-1">
-                  <div className="truncate font-semibold text-slate-300">{sarPost.filename}</div>
-                  <div>Dim: {sarPost.width}x{sarPost.height} ({sarPost.bands} bands)</div>
-                  <div>CRS: {sarPost.crs}</div>
-                  <div className="text-brand-cyan flex items-center gap-1 text-[10px] mt-1 bg-brand-blue/10 p-1 rounded border border-brand-blue/20">
-                    <Compass className="h-3 w-3 shrink-0" /> C-Band penetrative SAR
-                  </div>
-                </div>
-              ) : (
-                <button 
-                  onClick={() => triggerUpload('sar_post')}
-                  disabled={loading}
-                  className="flex w-full items-center justify-center gap-1 border border-dashed border-slate-700 hover:border-slate-500 rounded py-2 text-xs text-slate-400"
-                >
-                  <Upload className="h-3 w-3" /> Upload SAR Post
-                </button>
-              )}
+            <div className="grid grid-cols-2 gap-1.5 text-[11px]">
+              <button 
+                onClick={() => handleLoadDemo('single_optical')}
+                disabled={loading}
+                className="p-1.5 rounded bg-[#0d0f12] hover:bg-slate-800 border border-[#30363d] text-slate-300 hover:text-white truncate font-medium text-left"
+              >
+                1. Single Optical
+              </button>
+              <button 
+                onClick={() => handleLoadDemo('single_sar')}
+                disabled={loading}
+                className="p-1.5 rounded bg-[#0d0f12] hover:bg-slate-800 border border-[#30363d] text-slate-300 hover:text-white truncate font-medium text-left"
+              >
+                2. Single SAR
+              </button>
+              <button 
+                onClick={() => handleLoadDemo('cross_modal')}
+                disabled={loading}
+                className="p-1.5 rounded bg-[#0d0f12] hover:bg-slate-800 border border-[#30363d] text-slate-300 hover:text-white truncate font-medium text-left col-span-2"
+              >
+                3. Optical + SAR Cross-Modal Pair
+              </button>
+              <button 
+                onClick={() => handleLoadDemo('temporal')}
+                disabled={loading}
+                className="p-1.5 rounded bg-[#0d0f12] hover:bg-slate-800 border border-[#30363d] text-slate-300 hover:text-white truncate font-medium text-left col-span-2"
+              >
+                4. Pre + Post Bi-Temporal Pair
+              </button>
             </div>
           </div>
 
-          {/* Model Registry display trigger */}
+          {/* Flexible Upload Cards */}
+          <div className="space-y-3 mb-5">
+            <h2 className="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-2">
+              <Layers className="h-3.5 w-3.5 text-brand-cyan" /> Imagery Inputs
+            </h2>
+            
+            {/* Image 1 Card (Required) */}
+            <div className="rounded-md border border-[#30363d] bg-[#0d0f12] p-3">
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="font-bold text-xs text-slate-200">IMAGE 1 (PRIMARY)</span>
+                {image1 ? (
+                  <span className="text-[10px] text-green-400 bg-green-500/10 px-1.5 py-0.5 border border-green-500/20 rounded font-bold">
+                    {image1.modality}
+                  </span>
+                ) : (
+                  <span className="text-[10px] text-amber-400 bg-amber-500/10 px-1.5 py-0.5 border border-amber-500/20 rounded">
+                    Required
+                  </span>
+                )}
+              </div>
+              {image1 ? (
+                <div className="text-[11px] text-slate-400 space-y-1 mt-2">
+                  <div className="truncate font-semibold text-slate-200">{image1.filename}</div>
+                  <div>Dim: {image1.width}x{image1.height} ({image1.bands} band{image1.bands > 1 ? 's' : ''})</div>
+                  <div>CRS: {image1.crs}</div>
+                </div>
+              ) : (
+                <button 
+                  onClick={() => triggerUpload('image_1')}
+                  disabled={loading}
+                  className="flex w-full items-center justify-center gap-1.5 border border-dashed border-slate-700 hover:border-slate-500 rounded py-2 mt-2 text-xs text-slate-300 bg-[#161b22]/50 hover:bg-[#161b22]"
+                >
+                  <Upload className="h-3 w-3 text-brand-cyan" /> Upload Satellite GeoTIFF
+                </button>
+              )}
+            </div>
+
+            {/* Image 2 Card (Optional) */}
+            <div className="rounded-md border border-[#30363d] bg-[#0d0f12] p-3">
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="font-bold text-xs text-slate-200">IMAGE 2 (COMPANION)</span>
+                {image2 ? (
+                  <span className="text-[10px] text-green-400 bg-green-500/10 px-1.5 py-0.5 border border-green-500/20 rounded font-bold">
+                    {image2.modality}
+                  </span>
+                ) : (
+                  <span className="text-[10px] text-slate-500 bg-slate-800/50 px-1.5 py-0.5 border border-slate-700 rounded">
+                    Optional
+                  </span>
+                )}
+              </div>
+              {image2 ? (
+                <div className="text-[11px] text-slate-400 space-y-1 mt-2">
+                  <div className="truncate font-semibold text-slate-200">{image2.filename}</div>
+                  <div>Dim: {image2.width}x{image2.height} ({image2.bands} band{image2.bands > 1 ? 's' : ''})</div>
+                  <div>CRS: {image2.crs}</div>
+                </div>
+              ) : (
+                <button 
+                  onClick={() => triggerUpload('image_2')}
+                  disabled={loading}
+                  className="flex w-full items-center justify-center gap-1.5 border border-dashed border-slate-700 hover:border-slate-500 rounded py-2 mt-2 text-xs text-slate-400 bg-[#161b22]/30 hover:bg-[#161b22]"
+                >
+                  <Upload className="h-3 w-3 text-slate-400" /> Upload 2nd Image (Optional)
+                </button>
+              )}
+            </div>
+
+            <div className="text-[10px] text-slate-500 leading-snug px-1">
+              💡 <em>Single-image analysis works with Image 1 alone. Add Image 2 only for cross-modal (Optical+SAR) or bi-temporal change comparison.</em>
+            </div>
+          </div>
+
+          {/* Model Registry trigger */}
           <button 
             onClick={() => setShowRegistry(!showRegistry)}
-            className="flex w-full items-center justify-between border-t border-[#30363d] pt-4 text-xs font-semibold text-slate-300 hover:text-white"
+            className="flex w-full items-center justify-between border-t border-[#30363d] pt-3 text-xs font-semibold text-slate-300 hover:text-white"
           >
-            <span className="flex items-center gap-1.5"><Cpu className="h-3.5 w-3.5 text-brand-cyan" /> Model Registry & Info</span>
+            <span className="flex items-center gap-1.5"><Cpu className="h-3.5 w-3.5 text-brand-cyan" /> Model Registry & Adapters</span>
             <ChevronRight className={`h-4 w-4 transform transition ${showRegistry ? 'rotate-90' : ''}`} />
           </button>
 
           {showRegistry && modelRegistry.length > 0 && (
-            <div className="mt-3 space-y-3 bg-[#0d0f12] p-2.5 rounded border border-[#30363d] text-[10px]">
+            <div className="mt-3 space-y-2.5 bg-[#0d0f12] p-2.5 rounded border border-[#30363d] text-[10px]">
               {modelRegistry.map((m: any) => (
                 <div key={m.id} className="border-b border-[#30363d] pb-2 last:border-b-0 last:pb-0">
                   <div className="font-bold text-slate-300">{m.name} <span className="text-[8px] text-brand-cyan font-normal bg-brand-cyan/10 border border-brand-cyan/20 px-1 rounded">v{m.version}</span></div>
@@ -585,12 +589,12 @@ export default function App() {
           )}
         </div>
 
-        {/* Center Panel: Map Component (Leaves remaining space) */}
+        {/* Center Panel: Leaflet Map Component */}
         <div className="relative flex flex-1 flex-col h-full bg-[#090b0d]">
-          {/* Map Layer Controls overlay */}
-          <div className="absolute top-4 left-4 z-[1000] flex flex-col gap-2 rounded bg-brand-bg/90 border border-brand-border p-3 shadow-lg max-w-[200px] text-xs">
-            <div className="font-bold mb-1 flex items-center gap-1 text-white">
-              <Layers className="h-3.5 w-3.5 text-brand-cyan animate-pulse" /> MAP GRID LAYERS
+          {/* Map Layer Controls */}
+          <div className="absolute top-4 left-4 z-[1000] flex flex-col gap-1.5 rounded bg-brand-bg/90 border border-brand-border p-3 shadow-lg max-w-[210px] text-xs">
+            <div className="font-bold mb-1 flex items-center gap-1.5 text-white">
+              <Layers className="h-3.5 w-3.5 text-brand-cyan" /> MAP GRID LAYERS
             </div>
             <label className="flex items-center gap-2 hover:bg-slate-800 p-1 rounded cursor-pointer">
               <input type="radio" name="layer" checked={selectedLayer === 'satellite'} onChange={() => setSelectedLayer('satellite')} />
@@ -599,13 +603,13 @@ export default function App() {
             {analysis?.visual_evidence?.optical_water_mask && (
               <label className="flex items-center gap-2 hover:bg-slate-800 p-1 rounded cursor-pointer">
                 <input type="radio" name="layer" checked={selectedLayer === 'flood_mask'} onChange={() => setSelectedLayer('flood_mask')} />
-                <span className="text-brand-blue font-semibold">Post-Optical Mask</span>
+                <span className="text-brand-blue font-semibold">Optical Water Mask</span>
               </label>
             )}
             {analysis?.visual_evidence?.sar_water_mask && (
               <label className="flex items-center gap-2 hover:bg-slate-800 p-1 rounded cursor-pointer">
                 <input type="radio" name="layer" checked={selectedLayer === 'sar_water_mask'} onChange={() => setSelectedLayer('sar_water_mask')} />
-                <span className="text-brand-cyan font-semibold">Post-SAR Mask</span>
+                <span className="text-brand-cyan font-semibold">SAR Water Mask</span>
               </label>
             )}
             {analysis?.visual_evidence?.flooded_mask && (
@@ -617,14 +621,14 @@ export default function App() {
             {analysis?.visual_evidence?.lulc_grid && (
               <label className="flex items-center gap-2 hover:bg-slate-800 p-1 rounded cursor-pointer">
                 <input type="radio" name="layer" checked={selectedLayer === 'lulc_map'} onChange={() => setSelectedLayer('lulc_map')} />
-                <span className="text-brand-green font-semibold">Adapted LULC map</span>
+                <span className="text-brand-green font-semibold">Adapted LULC Map</span>
               </label>
             )}
             
             {activeOverlayUrl && (
               <div className="mt-2 border-t border-[#30363d] pt-2">
-                <div className="flex justify-between mb-1">
-                  <span>Layer Opacity:</span>
+                <div className="flex justify-between mb-1 text-[11px]">
+                  <span>Opacity:</span>
                   <span>{opacity}%</span>
                 </div>
                 <input 
@@ -639,14 +643,18 @@ export default function App() {
             )}
           </div>
 
-          {/* Coordinate telemetry overlays */}
-          <div className="absolute bottom-4 left-4 z-[1000] rounded hud-panel p-2 text-[10px] space-y-1 text-slate-300 font-mono">
-            <div>TARGET CRS: {opticalPost ? opticalPost.crs : 'Waiting for telemetry...'}</div>
-            {opticalPost && (
-              <>
-                <div>EXTENT MIN: {opticalPost.bounds.left.toFixed(2)}, {opticalPost.bounds.bottom.toFixed(2)}</div>
-                <div>EXTENT MAX: {opticalPost.bounds.right.toFixed(2)}, {opticalPost.bounds.top.toFixed(2)}</div>
-              </>
+          {/* Input Status & Telemetry HUD */}
+          <div className="absolute bottom-4 left-4 z-[1000] rounded hud-panel p-3 text-[11px] space-y-1 text-slate-300 font-mono border border-brand-border bg-brand-bg/95 shadow-lg">
+            <div className="font-bold text-white mb-1 flex items-center gap-1.5">
+              <Compass className="h-3.5 w-3.5 text-brand-cyan" /> WORKSPACE TELEMETRY
+            </div>
+            <div>CONFIG: <span className="text-brand-cyan font-bold">{inputConfig}</span></div>
+            <div>MODALITIES: {detectedModalities.length > 0 ? detectedModalities.join(' + ') : 'None'}</div>
+            <div>SPATIAL ALIGNMENT: {spatialAligned ? <span className="text-green-400 font-bold">YES</span> : <span className="text-slate-500">N/A</span>}</div>
+            {image1 && (
+              <div className="text-[10px] text-slate-400 mt-1 pt-1 border-t border-slate-700">
+                CRS: {image1.crs} | Res: {image1.pixel_size_x.toFixed(1)}m
+              </div>
             )}
           </div>
 
@@ -670,12 +678,12 @@ export default function App() {
           </MapContainer>
         </div>
 
-        {/* Right Side: Chat Sidebar & Telemetry Stats */}
-        <div className="flex w-[400px] flex-col border-l border-[#30363d] bg-[#161b22] h-full overflow-hidden">
+        {/* Right Side: Chat & Telemetry */}
+        <div className="flex w-[420px] flex-col border-l border-[#30363d] bg-[#161b22] h-full overflow-hidden shrink-0">
           
           {/* Top Panel: Statistics & Evidence Summary */}
           {analysis && (
-            <div className="p-4 border-b border-[#30363d] bg-[#0d0f12] text-xs shrink-0 max-h-[50%] overflow-y-auto">
+            <div className="p-4 border-b border-[#30363d] bg-[#0d0f12] text-xs shrink-0 max-h-[45%] overflow-y-auto">
               <div className="flex justify-between items-center mb-2">
                 <span className="text-xs font-bold tracking-wide uppercase text-slate-400">Analysis Telemetry</span>
                 <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
@@ -683,15 +691,15 @@ export default function App() {
                   analysis.confidence.includes('Moderate') ? 'bg-orange-500/10 text-orange-400 border border-orange-500/20' :
                   'bg-red-500/10 text-red-400 border border-red-500/20'
                 }`}>
-                  Confidence: {analysis.confidence.split('-')[0]}
+                  {analysis.confidence}
                 </span>
               </div>
               
               {/* Evidence fusion status */}
               <div className="rounded p-2 bg-[#161b22] border border-[#30363d] mb-3">
-                <div className="flex items-center gap-1.5 font-semibold text-white mb-1">
+                <div className="flex items-center gap-1.5 font-semibold text-white mb-1 text-[11px]">
                   <ShieldAlert className="h-3.5 w-3.5 text-brand-cyan" /> 
-                  Evidence Fusion: {analysis.evidence_fusion.agreement_status}
+                  Evidence Status: {analysis.evidence_fusion.agreement_status}
                 </div>
                 <div className="text-[10px] text-slate-400 space-y-1">
                   {analysis.evidence_fusion.optical_findings && <div>• Optical: {analysis.evidence_fusion.optical_findings}</div>}
@@ -702,19 +710,31 @@ export default function App() {
               {/* Spatial metrics */}
               {analysis.spatial_statistics && (
                 <div className="space-y-2 mb-3">
-                  <div className="font-bold text-slate-300">Geospatial Measurements:</div>
+                  <div className="font-bold text-slate-300">Geospatial Metrics:</div>
                   <table className="w-full text-[11px] text-slate-400 border border-[#30363d] rounded">
                     <tbody>
                       {analysis.spatial_statistics.flooded_area_km2 !== undefined && (
                         <tr className="border-b border-[#30363d] bg-[#161b22]/50">
-                          <td className="p-1 font-semibold text-slate-300">Flooded Expansion</td>
+                          <td className="p-1 font-semibold text-slate-300">Flood Expansion</td>
                           <td className="p-1 font-bold text-brand-red">{analysis.spatial_statistics.flooded_area_km2.toFixed(3)} km²</td>
                         </tr>
                       )}
                       {analysis.spatial_statistics.stable_area_km2 !== undefined && (
                         <tr className="border-b border-[#30363d]">
-                          <td className="p-1">Stable Water (Channel)</td>
+                          <td className="p-1">Stable Water</td>
                           <td className="p-1">{analysis.spatial_statistics.stable_area_km2.toFixed(3)} km²</td>
+                        </tr>
+                      )}
+                      {analysis.spatial_statistics.optical_water_percentage !== undefined && (
+                        <tr className="border-b border-[#30363d]">
+                          <td className="p-1">Optical Water Extent</td>
+                          <td className="p-1 font-semibold text-brand-blue">{(analysis.spatial_statistics.optical_water_percentage * 100).toFixed(1)}%</td>
+                        </tr>
+                      )}
+                      {analysis.spatial_statistics.sar_water_percentage !== undefined && (
+                        <tr className="border-b border-[#30363d]">
+                          <td className="p-1">SAR Water Extent</td>
+                          <td className="p-1 font-semibold text-brand-cyan">{(analysis.spatial_statistics.sar_water_percentage * 100).toFixed(1)}%</td>
                         </tr>
                       )}
                       {analysis.spatial_statistics.landcover_intersection && (
@@ -741,9 +761,9 @@ export default function App() {
               <div className="flex gap-2">
                 <button 
                   onClick={handleDownloadReport}
-                  className="flex items-center gap-1 px-2.5 py-1.5 bg-brand-blue border border-brand-cyan/20 hover:bg-brand-blue/80 transition rounded text-white font-bold"
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-brand-blue border border-brand-cyan/20 hover:bg-brand-blue/80 transition rounded text-white font-bold text-xs"
                 >
-                  <Download className="h-3 w-3" /> Download Report
+                  <Download className="h-3.5 w-3.5" /> Export Investigation Report
                 </button>
               </div>
             </div>
@@ -754,7 +774,7 @@ export default function App() {
             {messages.map((m, idx) => (
               <div 
                 key={idx} 
-                className={`flex flex-col max-w-[90%] rounded-lg p-3 ${
+                className={`flex flex-col max-w-[92%] rounded-lg p-3 ${
                   m.sender === 'user' 
                     ? 'bg-brand-blue/15 border border-brand-blue/30 text-slate-100 self-end ml-auto' 
                     : 'bg-[#161b22] border border-[#30363d] text-slate-300 self-start mr-auto'
@@ -772,39 +792,39 @@ export default function App() {
             )}
           </div>
 
-          {/* Quick-Prompt Scenario Grid */}
+          {/* Quick-Prompt Scenario Matrix */}
           <div className="p-3 bg-[#0d0f12] border-t border-[#30363d] shrink-0 space-y-2">
             <div className="text-[10px] font-bold text-slate-400 tracking-wide uppercase flex items-center gap-1">
-              <Info className="h-3 w-3 text-brand-cyan" /> SCENARIO INVESTIGATION SHORTCUTS
+              <Info className="h-3 w-3 text-brand-cyan" /> PS 26167 SCENARIO SHORTCUTS
             </div>
             <div className="grid grid-cols-2 gap-1.5 text-[10px]">
               <button 
-                onClick={() => handleQuery("Is there a water body in this image?")}
-                disabled={loading || !opticalPost}
+                onClick={() => handleQuery("Is there water in this image?")}
+                disabled={loading || !image1}
                 className="text-left p-1.5 rounded bg-[#161b22] hover:bg-slate-800 border border-[#30363d] text-slate-300 hover:text-white truncate disabled:opacity-40"
               >
-                Demo 1: Single-Image VQA
+                1. Single-Image VQA
               </button>
               <button 
                 onClick={() => handleQuery("Highlight the water body")}
-                disabled={loading || !opticalPost}
+                disabled={loading || !image1}
                 className="text-left p-1.5 rounded bg-[#161b22] hover:bg-slate-800 border border-[#30363d] text-slate-300 hover:text-white truncate disabled:opacity-40"
               >
-                Demo 2: Flood Grounding
+                2. Flood Grounding
               </button>
               <button 
                 onClick={() => handleQuery("What changed after the flood?")}
-                disabled={loading || !opticalPre || !opticalPost}
+                disabled={loading || !image1}
                 className="text-left p-1.5 rounded bg-[#161b22] hover:bg-slate-800 border border-[#30363d] text-slate-300 hover:text-white truncate disabled:opacity-40 col-span-2"
               >
-                Demo 3: Bi-Temporal Flood Change
+                3. Bi-Temporal Flood Change
               </button>
               <button 
                 onClick={() => handleQuery("Use the optical and SAR images together to identify inundated regions and calculate affected agriculture")}
-                disabled={loading || !opticalPost || !sarPost}
+                disabled={loading || !image1}
                 className="text-left p-1.5 rounded bg-[#161b22] hover:bg-slate-800 border border-[#30363d] text-slate-300 hover:text-white truncate disabled:opacity-40 col-span-2"
               >
-                Demo 4: Optical + SAR Fusion & LULC
+                4. Optical + SAR Cross-Modal Fusion
               </button>
             </div>
           </div>
@@ -822,7 +842,8 @@ export default function App() {
               />
               <button
                 onClick={() => handleQuery()}
-                className="rounded bg-brand-blue px-4 py-1.5 text-xs font-semibold text-white hover:bg-brand-blue/90"
+                disabled={loading || !image1}
+                className="rounded bg-brand-blue px-4 py-1.5 text-xs font-semibold text-white hover:bg-brand-blue/90 disabled:opacity-50"
               >
                 Query
               </button>
@@ -833,12 +854,14 @@ export default function App() {
 
       </div>
 
-      {/* Execution Trace overlay at bottom of Map if analysis is active */}
+      {/* Execution Trace HUD */}
       {analysis && analysis.execution_trace && (
-        <div className="absolute bottom-4 right-[420px] z-[1000] w-[350px] max-h-[220px] rounded bg-brand-bg/95 border border-brand-border p-3 shadow-lg flex flex-col text-[10px]">
+        <div className="absolute bottom-4 right-[440px] z-[1000] w-[360px] max-h-[220px] rounded bg-brand-bg/95 border border-brand-border p-3 shadow-lg flex flex-col text-[10px]">
           <div className="font-bold border-b border-[#30363d] pb-1.5 mb-1.5 text-slate-300 flex items-center justify-between">
-            <span>✓ AUDITABLE EXECUTION TRACE</span>
-            <span className="text-[8px] bg-brand-cyan/15 text-brand-cyan px-1 rounded uppercase tracking-wider">Secured</span>
+            <span>✓ AUDITABLE WORKFLOW TRACE</span>
+            <span className="text-[8px] bg-brand-cyan/15 text-brand-cyan px-1 rounded uppercase tracking-wider font-bold">
+              {analysis.input_configuration || 'Verified'}
+            </span>
           </div>
           <div className="flex-1 overflow-y-auto space-y-1.5 scrollbar-thin">
             {analysis.execution_trace.map((step) => (
@@ -861,7 +884,6 @@ export default function App() {
   );
 }
 
-// Simple uuid generation fallback since we aren't importing crypto directly
 function uuidv4() {
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
     var r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
