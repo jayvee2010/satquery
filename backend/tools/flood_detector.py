@@ -4,7 +4,7 @@ from rasterio.enums import ColorInterp
 from scipy import ndimage
 import os
 
-def clean_water_mask(raw_mask: np.ndarray, min_cluster_size: int = 8) -> np.ndarray:
+def clean_water_mask(raw_mask: np.ndarray, min_cluster_size: int = 10) -> np.ndarray:
     """
     Applies spatial morphological post-processing to eliminate salt-and-pepper noise,
     isolated shadow pixels, and radar speckle while preserving genuine contiguous water bodies.
@@ -43,9 +43,9 @@ def detect_water_optical(filepath: str, threshold: float = 0.05, green_band: int
        Water has NDWI > threshold (water absorbs NIR while reflecting green).
        
     2. For 3-band RGB imagery (without NIR):
-       Applies Dark Object Subtraction (DOS1) to remove atmospheric Rayleigh scattering (blue haze pedestal),
-       followed by the Normalized Visible Water Index (VWI / NDWI_RGB) with Excess Green (ExG) vegetation suppression
-       and soil/urban rejection.
+       Applies physical Visible Water Indexing (VWI = (Blue - Red) / (Blue + Red)) with
+       scene-level brightness cutoff (water is darker than surrounding land) and chlorophyll
+       excess-green rejection to prevent agricultural false alarms.
     """
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"File not found: {filepath}")
@@ -112,49 +112,47 @@ def detect_water_optical(filepath: str, threshold: float = 0.05, green_band: int
                         elif "green" in d or "b03" in d or "b3" in d: g_idx = idx
                         elif "blue" in d or "b02" in d or "b2" in d: b_idx = idx
                         
-                r_raw = src.read(r_idx).astype(np.float32)
-                g_raw = src.read(g_idx).astype(np.float32)
-                b_raw = src.read(b_idx).astype(np.float32)
+                red = src.read(r_idx).astype(np.float32)
+                green = src.read(g_idx).astype(np.float32)
+                blue = src.read(b_idx).astype(np.float32)
                 
-                # Apply Dark Object Subtraction (DOS1) to remove atmospheric path radiance / Rayleigh blue haze
-                p1_r = np.percentile(r_raw, 1)
-                p1_g = np.percentile(g_raw, 1)
-                p1_b = np.percentile(b_raw, 1)
+                v = (red + green + blue) / 3.0
                 
-                r = np.maximum(0.0, r_raw - p1_r)
-                g = np.maximum(0.0, g_raw - p1_g)
-                b = np.maximum(0.0, b_raw - p1_b)
+                # 1. Vegetation Discrimination (Chlorophyll Green Peak):
+                # Crops and grass reflect high green: G > B * 1.05 and G > R * 1.15
+                is_vegetation = (green > blue * 1.05) & (green > red * 1.15)
                 
-                v_surf = (r + g + b) / 3.0
+                # 2. Soil / Urban Discrimination: Red is dominant or high brightness
+                is_soil_urban = (red >= green * 0.95) | (red >= blue * 0.95) | (v > 110.0)
                 
-                # Excess Green (Vegetation discrimination on surface reflectance)
-                exg = (2.0 * g) - r - b
-                is_vegetation = (g > b * 1.05) & (exg > 1.0) & (g > r * 1.05)
+                # 3. Water Absorption & Contrast Criteria:
+                # - Water absorbs visible light: V is low
+                # - Blue is high relative to Red: (B - R) / (B + R) > 0.15 and B > R * 1.15
+                # - Green does not dominate over Blue: G < B * 1.1
+                # - Strictly not vegetation and not soil/urban
+                # - Non-zero signal (V >= 10)
+                p15_v = np.percentile(v, 15)
+                water_cutoff_v = min(56.0, max(45.0, p15_v))
                 
-                # Soil / Built-up discrimination (Red dominance)
-                is_soil_urban = (r >= g * 1.05) | (r >= b * 1.05)
-                
-                # Visible Water Index (Blue - Red surface contrast)
-                denom_br = b + r
+                denom_br = blue + red
                 denom_br[denom_br == 0] = 1e-5
-                vwi = (b - r) / denom_br
+                vwi = (blue - red) / denom_br
                 
-                # Raw Water Identification
                 raw_mask = (
+                    (v <= water_cutoff_v) & 
                     (vwi > 0.15) & 
-                    (b >= g * 0.95) & 
-                    (b > r * 1.15) & 
+                    (blue > red * 1.15) & 
+                    (green < blue * 1.1) & 
                     (~is_vegetation) & 
                     (~is_soil_urban) & 
-                    (v_surf >= 1.0) & 
-                    (v_surf <= 120.0)
+                    (v >= 10.0)
                 ).astype(np.uint8)
                 
-                # Morphological noise cleaning
+                # Morphological noise cleaning (3x3 median filter + MMU area filter)
                 water_mask = clean_water_mask(raw_mask, min_cluster_size=10)
                 water_pct = float(np.sum(water_mask) / (width * height))
-                limitations = ["Optical image lacks NIR band. Applied Visible Water Index (VWI) with DOS1 atmospheric haze correction and morphological spatial filtering."]
-                method = "Visible Water Index (with DOS1 Atmospheric Haze Correction)"
+                limitations = ["Optical image lacks NIR band. Applied Visible Water Index (VWI) with chlorophyll rejection and spatial morphological cleaning."]
+                method = "Visible Water Index (VWI RGB visible band analysis)"
                 ndwi = vwi
                 
             return {
