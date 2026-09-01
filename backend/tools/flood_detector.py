@@ -4,7 +4,7 @@ from rasterio.enums import ColorInterp
 from scipy import ndimage
 import os
 
-def clean_water_mask(raw_mask: np.ndarray, min_cluster_size: int = 10) -> np.ndarray:
+def clean_water_mask(raw_mask: np.ndarray, min_cluster_size: int = 12) -> np.ndarray:
     """
     Applies spatial morphological post-processing to eliminate salt-and-pepper noise,
     isolated shadow pixels, and radar speckle while preserving genuine contiguous water bodies.
@@ -44,8 +44,8 @@ def detect_water_optical(filepath: str, threshold: float = 0.05, green_band: int
        
     2. For 3-band RGB imagery (without NIR):
        Applies physical Visible Water Indexing (VWI = (Blue - Red) / (Blue + Red)) with
-       scene-level brightness cutoff (water is darker than surrounding land) and chlorophyll
-       excess-green rejection to prevent agricultural false alarms.
+       Excess Green (ExG = 2G - R - B <= 0) chlorophyll rejection and Green-to-Red absorption ratio
+       limits (G <= 1.35 * R) to strictly exclude dark forest canopies, crops, and pastures.
     """
     if not os.path.exists(filepath):
         raise FileNotFoundError(f"File not found: {filepath}")
@@ -92,7 +92,7 @@ def detect_water_optical(filepath: str, threshold: float = 0.05, green_band: int
                 
                 # Thresholding and shadow guardrail
                 raw_mask = (ndwi > threshold).astype(np.uint8)
-                water_mask = clean_water_mask(raw_mask, min_cluster_size=8)
+                water_mask = clean_water_mask(raw_mask, min_cluster_size=12)
                 water_pct = float(np.sum(water_mask) / (width * height))
                 
                 limitations = []
@@ -118,40 +118,40 @@ def detect_water_optical(filepath: str, threshold: float = 0.05, green_band: int
                 
                 v = (red + green + blue) / 3.0
                 
-                # 1. Vegetation Discrimination (Chlorophyll Green Peak):
-                # Crops and grass reflect high green: G > B * 1.05 and G > R * 1.15
-                is_vegetation = (green > blue * 1.05) & (green > red * 1.15)
+                # 1. Excess Green (ExG) and Chlorophyll Green-to-Red ratio:
+                # In vegetation/crops/forests, chlorophyll reflects Green strongly:
+                # ExG = 2*G - R - B > 0 and G > 1.35*R.
+                exg = (2.0 * green) - red - blue
+                is_vegetation = (exg > 0.0) | (green > red * 1.35)
                 
                 # 2. Soil / Urban Discrimination: Red is dominant or high brightness
-                is_soil_urban = (red >= green * 0.95) | (red >= blue * 0.95) | (v > 110.0)
+                is_soil_urban = (red >= green * 0.95) | (red >= blue * 0.95) | (v > 100.0)
                 
-                # 3. Water Absorption & Contrast Criteria:
-                # - Water absorbs visible light: V is low
-                # - Blue is high relative to Red: (B - R) / (B + R) > 0.15 and B > R * 1.15
-                # - Green does not dominate over Blue: G < B * 1.1
+                # 3. Water Criteria:
+                # - Negative Excess Green (ExG <= 0): Blue dominates over Green and Red
+                # - Blue is high relative to Red: Blue > Red * 1.2
+                # - Green is not elevated over Red: Green <= Red * 1.35
+                # - Low-to-moderate surface brightness (10 <= V <= 65)
                 # - Strictly not vegetation and not soil/urban
-                # - Non-zero signal (V >= 10)
-                p15_v = np.percentile(v, 15)
-                water_cutoff_v = min(56.0, max(45.0, p15_v))
-                
                 denom_br = blue + red
                 denom_br[denom_br == 0] = 1e-5
                 vwi = (blue - red) / denom_br
                 
                 raw_mask = (
-                    (v <= water_cutoff_v) & 
+                    (exg <= 0.0) & 
                     (vwi > 0.15) & 
-                    (blue > red * 1.15) & 
-                    (green < blue * 1.1) & 
+                    (blue > red * 1.20) & 
+                    (green <= red * 1.35) & 
                     (~is_vegetation) & 
                     (~is_soil_urban) & 
+                    (v <= 65.0) & 
                     (v >= 10.0)
                 ).astype(np.uint8)
                 
                 # Morphological noise cleaning (3x3 median filter + MMU area filter)
-                water_mask = clean_water_mask(raw_mask, min_cluster_size=10)
+                water_mask = clean_water_mask(raw_mask, min_cluster_size=12)
                 water_pct = float(np.sum(water_mask) / (width * height))
-                limitations = ["Optical image lacks NIR band. Applied Visible Water Index (VWI) with chlorophyll rejection and spatial morphological cleaning."]
+                limitations = ["Optical image lacks NIR band. Applied Visible Water Index (VWI) with Excess Green (ExG <= 0) chlorophyll rejection and spatial cleaning."]
                 method = "Visible Water Index (VWI RGB visible band analysis)"
                 ndwi = vwi
                 
@@ -194,7 +194,7 @@ def detect_water_sar(filepath: str, threshold_db: float = -18.0, sar_band: int =
             
             # Thresholding + Morphological speckle filtering
             raw_mask = (db_data < threshold_db).astype(np.uint8)
-            water_mask = clean_water_mask(raw_mask, min_cluster_size=8)
+            water_mask = clean_water_mask(raw_mask, min_cluster_size=12)
             water_pct = float(np.sum(water_mask) / (width * height))
             
             return {
