@@ -447,9 +447,19 @@ export default function App() {
         {/* Left Side: Uploads & Telemetry */}
         <div className="flex w-[330px] flex-col border-r border-[#30363d] bg-[#161b22] p-4 text-sm overflow-y-auto shrink-0">
           <div className="mb-3 flex items-center justify-between">
-            <h1 className="text-base font-bold tracking-tight text-white flex items-center gap-2">
-              🛰️ SatQuery AI
-            </h1>
+            <div className="flex items-center gap-2.5">
+              <img 
+                src="/tri_netra_logo.jpg" 
+                alt="Tri-Netra Logo" 
+                className="h-8 w-8 rounded-full border border-brand-cyan/40 object-cover shadow-sm bg-slate-800" 
+              />
+              <div>
+                <h1 className="text-sm font-bold tracking-tight text-white leading-tight">
+                  SatQuery AI
+                </h1>
+                <div className="text-[10px] text-slate-400 font-medium">Team Tri-Netra (T151)</div>
+              </div>
+            </div>
             <div className="flex items-center gap-1">
               <span className="rounded bg-brand-darkBlue px-1.5 py-0.5 text-[10px] font-bold text-brand-cyan border border-brand-blue/30">
                 ISRO PS 26167
