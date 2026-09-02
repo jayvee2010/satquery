@@ -94,7 +94,7 @@ export default function App() {
   const [messages, setMessages] = useState<Message[]>([
     {
       sender: 'system',
-      text: "🛰️ Welcome to SatQuery AI (ISRO PS 26167). Upload a single satellite image (Optical or SAR) to begin VQA and grounding, or add a second observation for cross-modal fusion or temporal change detection.\n\n🇮🇳 SatQuery AI में आपका स्वागत है। उपग्रह चित्र अपलोड करके विश्लेषण शुरू करें।",
+      text: "🛰️ Welcome to SatQuery AI. Upload a single satellite image (Optical or SAR) to begin VQA and grounding, or add a second observation for cross-modal fusion or temporal change detection.\n\n🇮🇳 SatQuery AI में आपका स्वागत है। उपग्रह चित्र अपलोड करके विश्लेषण शुरू करें।",
       timestamp: new Date().toLocaleTimeString()
     }
   ]);
@@ -459,11 +459,6 @@ export default function App() {
                 </h1>
                 <div className="text-[10px] text-slate-400 font-medium">Team Tri-Netra (T151)</div>
               </div>
-            </div>
-            <div className="flex items-center gap-1">
-              <span className="rounded bg-brand-darkBlue px-1.5 py-0.5 text-[10px] font-bold text-brand-cyan border border-brand-blue/30">
-                ISRO PS 26167
-              </span>
             </div>
           </div>
 
